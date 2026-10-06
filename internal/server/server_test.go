@@ -257,12 +257,17 @@ func TestHeartbeatsGetAcksAndProbesAreNotCounted(t *testing.T) {
 	}
 	probe := pkt("node-1", 1, 1, 0)
 	ack := handle(probe)
-	if seq, err := wire.DecodeAck(ack, testKey, "node-1", probe.BootID, 1); err != nil || seq != 0 {
+	if seq, _, err := wire.DecodeAck(ack, testKey, "node-1", probe.BootID, 1); err != nil || seq != 0 {
 		t.Fatalf("probe ack seq %d err %v", seq, err)
 	}
 	if handle(kmsgPkt(1, 1, 1, 1, 1, "m")) != nil {
 		t.Fatal("record packet got an ack")
 	}
+	// Acks per agent run are limited, so replayed heartbeats cannot be reflected at full rate.
+	if handle(pkt("node-1", 1, 1, 0)) != nil {
+		t.Fatal("second ack within the limit")
+	}
+	time.Sleep(ackEvery)
 	if ack := handle(pkt("node-1", 1, 1, 2)); ack == nil {
 		t.Fatal("heartbeat got no ack")
 	}

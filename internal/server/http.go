@@ -53,7 +53,19 @@ func (a *API) Handler() http.Handler {
 		metrics = a.require(RoleViewer, metrics)
 	}
 	mux.Handle("GET /metrics", metrics)
-	return mux
+	return secure(mux)
+}
+
+// secure adds headers that stop other sites from framing the UI, for example to click "acknowledge".
+func secure(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hd := w.Header()
+		hd.Set("X-Frame-Options", "DENY")
+		hd.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		hd.Set("X-Content-Type-Options", "nosniff")
+		hd.Set("Referrer-Policy", "no-referrer")
+		h.ServeHTTP(w, r)
+	})
 }
 
 func (a *API) require(min Role, h http.Handler) http.Handler {
@@ -144,6 +156,10 @@ func (a *API) download(w http.ResponseWriter, r *http.Request) {
 	for {
 		recs, err := a.Store.Query(r.Context(), f)
 		if err != nil {
+			// The status line is already sent, so the last line tells that the file is incomplete.
+			if r.Context().Err() == nil {
+				enc.Encode(map[string]string{"error": "download incomplete: " + err.Error()})
+			}
 			return
 		}
 		for i := range recs {

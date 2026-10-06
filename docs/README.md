@@ -1,0 +1,29 @@
+# lastgasp documentation
+
+lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last lines before a crash, a hang or a dead disk are saved somewhere else. A small agent runs on every machine, a server stores the logs, finds missing packets, turns crashes and kernel errors into incidents and sends alerts.
+
+| Page | Content |
+| --- | --- |
+| [Getting started](getting-started.md) | build, first server, first agent, check that logs arrive |
+| [How it works](how-it-works.md) | agent and server design, packets, acks, missing packets, deduplication |
+| [Agent](agent.md) | install script, flags, systemd unit, sizing, troubleshooting |
+| [Server](server.md) | binary, systemd, Docker, database, retention, reload, reverse proxy |
+| [Incidents and alerts](incidents-and-alerts.md) | incident kinds, rules, webhooks, email, testing incidents |
+| [Web UI and API](web-ui-and-api.md) | login, roles, JSON API with examples, Prometheus metrics |
+| [Operations](operations.md) | production checklist, monitoring, backups, upgrades, troubleshooting, limits |
+| [Open work](open-work.md) | ideas not done yet |
+
+## Words used in these pages
+
+| Word | Meaning |
+| --- | --- |
+| host | a machine running the agent, named by `-hostname` or the kernel hostname |
+| boot | one run of the kernel, named by the kernel boot ID (`/proc/sys/kernel/random/boot_id`) |
+| agent run | one start of the agent process, named by a random instance ID. A boot can have several agent runs |
+| record | one kernel log line, or one part of a line too long for one packet |
+| kmsg | the live kernel log, read from `/dev/kmsg` |
+| pstore | kernel logs saved in persistent memory or EFI variables before a crash, read after the next boot from `/sys/fs/pstore` |
+| sequence number | a counter in every packet of an agent run, used to find missing packets |
+| ack | the answer of the server to an agent heartbeat |
+| incident | something worth a look: a crash, a reboot, a silent host or a kernel error |
+| target | where alerts go: a webhook or an email address list |

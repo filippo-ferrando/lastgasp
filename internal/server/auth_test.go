@@ -162,6 +162,7 @@ func TestFailedLoginsAreSlowedDown(t *testing.T) {
 	now := time.Now()
 	auth.limit.now = func() time.Time { return now }
 	auth.ProxyHeader = "X-Forwarded-For"
+	auth.TrustedProxies, _ = ParsePrefixes("192.0.2.0/24")
 	h := auth.Require(RoleViewer, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	try := func(ip, user, pass string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", "/", nil)
@@ -171,21 +172,36 @@ func TestFailedLoginsAreSlowedDown(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w
 	}
-	for i := 0; i < maxFails; i++ {
-		if code := try("10.0.0.1", "alice", "guess").Code; code != 401 {
-			t.Fatalf("failure %d got %d", i, code)
+	fail := func(ip string) {
+		t.Helper()
+		for i := 0; i < maxFails; i++ {
+			if code := try(ip, "alice", "guess").Code; code != 401 {
+				t.Fatalf("failure %d from %s got %d", i, ip, code)
+			}
 		}
 	}
-	// Both the address and the user are blocked now, even with the right password.
+	fail("10.0.0.1")
+	// The address is blocked now, even with the right password.
 	w := try("10.0.0.1", "bob", "b-pass")
 	if w.Code != 429 || w.Header().Get("Retry-After") != "61" {
 		t.Fatalf("blocked ip got %d retry %q", w.Code, w.Header().Get("Retry-After"))
 	}
-	if code := try("10.0.0.2", "alice", "a-pass").Code; code != 429 {
-		t.Fatalf("blocked user got %d", code)
-	}
 	if code := try("10.0.0.2", "bob", "b-pass").Code; code != 200 {
 		t.Fatalf("other user and address got %d", code)
+	}
+	// alice is blocked, but only for addresses that failed too, so nobody else can lock her out.
+	if code := try("10.0.0.2", "alice", "a-pass").Code; code != 200 {
+		t.Fatalf("blocked user from a clean address got %d", code)
+	}
+	if auth.limit.wait("user:alice") != 0 {
+		t.Fatal("good login did not clear the user")
+	}
+	fail("10.0.0.3")
+	if code := try("10.0.0.4", "bob", "wrong").Code; code != 401 {
+		t.Fatalf("got %d", code)
+	}
+	if code := try("10.0.0.4", "alice", "a-pass").Code; code != 429 {
+		t.Fatalf("blocked user from a failing address got %d", code)
 	}
 	// The block ends, and the next failure doubles the delay.
 	now = now.Add(61 * time.Second)
@@ -200,7 +216,30 @@ func TestFailedLoginsAreSlowedDown(t *testing.T) {
 	if code := try("10.0.0.3", "alice", "a-pass").Code; code != 200 {
 		t.Fatalf("after the window got %d", code)
 	}
-	if auth.limit.wait("user:alice") != 0 || len(auth.limit.entries) > 2 {
+	if auth.limit.wait("user:alice") != 0 || len(auth.limit.entries) > 3 {
 		t.Fatalf("state left: %v", auth.limit.entries)
+	}
+}
+
+func TestProxyHeaderOnlyFromTrustedProxies(t *testing.T) {
+	a := &Auth{ProxyHeader: "X-Forwarded-For"}
+	a.TrustedProxies, _ = ParsePrefixes("10.0.0.1, 192.168.0.0/16")
+	ip := func(remote, fwd string) string {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		r.Header.Set("X-Forwarded-For", fwd)
+		return a.clientIP(r)
+	}
+	if got := ip("10.0.0.1:5000", "1.2.3.4"); got != "1.2.3.4" {
+		t.Fatalf("trusted proxy: %s", got)
+	}
+	if got := ip("8.8.8.8:5000", "1.2.3.4"); got != "8.8.8.8" {
+		t.Fatalf("untrusted caller set its own address: %s", got)
+	}
+	if got := ip("[2001:db8::1]:5000", ""); got != "2001:db8::/64" {
+		t.Fatalf("ipv6 not cut to /64: %s", got)
+	}
+	if _, err := ParsePrefixes("nope"); err == nil {
+		t.Fatal("bad prefix accepted")
 	}
 }

@@ -113,7 +113,7 @@ func (d *Detector) Load(ctx context.Context, hosts []HostSeen, now time.Time) er
 	for _, h := range hosts {
 		d.hosts[h.Host] = &hostState{boot: h.BootID, lastSeen: now}
 	}
-	open, err := d.Store.Incidents(ctx, store.IncidentFilter{OpenOnly: true, Limit: 1000})
+	open, err := d.Store.OpenIncidents(ctx)
 	if err != nil {
 		return err
 	}
@@ -218,8 +218,7 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 		created = true
 	}
 	for inc := range late {
-		d.decide(ctx, inc)
-		if inc.Kind != KindCrash {
+		if err := d.decide(ctx, inc); err != nil || inc.Kind != KindCrash {
 			continue
 		}
 		delete(d.lastReboot, inc.Host)
@@ -260,7 +259,10 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 	for key, inc := range d.open {
 		switch {
 		case inc.Kind == KindReboot && now.Sub(inc.OpenedAt) >= d.cfg.CrashWait:
-			d.decide(ctx, inc)
+			// Without the logs a crash would look like a clean reboot, so the check waits for the database.
+			if err := d.decide(ctx, inc); err != nil {
+				continue
+			}
 			d.close(ctx, key, inc, now)
 			if inc.Kind == KindReboot {
 				d.lastReboot[inc.Host] = inc
@@ -279,6 +281,14 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 			wake = true
 		}
 	}
+	d.saveDirty(ctx)
+	d.updateOpen()
+	if wake {
+		d.Wake()
+	}
+}
+
+func (d *Detector) saveDirty(ctx context.Context) {
 	for id, inc := range d.dirty {
 		if err := d.Store.UpdateIncident(ctx, inc); err != nil {
 			d.Log.Error("save incident", "err", err)
@@ -286,10 +296,13 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 		}
 		delete(d.dirty, id)
 	}
-	d.updateOpen()
-	if wake {
-		d.Wake()
-	}
+}
+
+// Flush saves incident changes not written yet, like counts of grouped kernel errors.
+func (d *Detector) Flush(ctx context.Context) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.saveDirty(ctx)
 }
 
 // Forget drops hosts not seen since cutoff, so hosts removed by retention do not turn silent again.
@@ -310,6 +323,7 @@ func (d *Detector) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			d.Flush(context.WithoutCancel(ctx))
 			return
 		case now := <-t.C:
 			d.Tick(ctx, now)
@@ -318,18 +332,21 @@ func (d *Detector) Run(ctx context.Context) {
 }
 
 // decide turns a reboot into a crash when the old boot left pstore lines or ended with a critical kernel line.
-func (d *Detector) decide(ctx context.Context, inc *store.Incident) {
+// On a database error nothing changes and the error is returned, so the check can run again.
+func (d *Detector) decide(ctx context.Context, inc *store.Incident) error {
 	rules := d.rules.Load()
 	pstore, err := d.Store.Query(ctx, store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "pstore", MaxLevel: -1, Oldest: true, Limit: 10000})
 	if err != nil {
-		d.Log.Error("crash check", "err", err)
+		d.Log.Error("crash check, will retry", "err", err)
+		return err
 	}
 	var tail []store.Record
 	if inc.LastRecordID > 0 {
 		tail, err = d.Store.Query(ctx, store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "kmsg", MaxLevel: -1,
 			BeforeID: inc.LastRecordID + 1, Limit: d.cfg.Context})
 		if err != nil {
-			d.Log.Error("crash check", "err", err)
+			d.Log.Error("crash check, will retry", "err", err)
+			return err
 		}
 	}
 	var hit *Rule
@@ -347,7 +364,7 @@ func (d *Detector) decide(ctx context.Context, inc *store.Incident) {
 		}
 	}
 	if hit == nil && len(pstore) == 0 {
-		return
+		return nil
 	}
 	inc.Kind, inc.Severity, inc.Count = KindCrash, store.SeverityCritical, len(pstore)
 	switch {
@@ -359,6 +376,7 @@ func (d *Detector) decide(ctx context.Context, inc *store.Incident) {
 	}
 	d.Metrics.Created.WithLabelValues(inc.Host, KindCrash).Inc()
 	d.Log.Info("incident is a crash", "id", inc.ID, "host", inc.Host, "rule", inc.Rule, "summary", inc.Summary)
+	return nil
 }
 
 func (d *Detector) create(ctx context.Context, inc *store.Incident) {

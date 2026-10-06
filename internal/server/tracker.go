@@ -169,6 +169,18 @@ func (t *Tracker) Load(streams []Stream) {
 	}
 }
 
+// Restore puts back streams that are not tracked, and leaves live ones alone.
+func (t *Tracker) Restore(streams []Stream) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range streams {
+		s := streams[i]
+		if k := s.key(); t.streams[k] == nil {
+			t.streams[k] = &s
+		}
+	}
+}
+
 // HostSummary adds up all streams of one host.
 type HostSummary struct {
 	Host       string     `json:"host"`

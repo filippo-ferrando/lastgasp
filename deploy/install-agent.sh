@@ -135,7 +135,8 @@ chmod 644 "$ROOT$UNIT_DIR/$UNIT"
 cmd="$BIN_DIR/lastgasp-agent -server $servers -key-file $CONF_DIR/agent.key"
 [ -n "$host" ] && cmd="$cmd -hostname $host"
 [ -n "$extra" ] && cmd="$cmd $extra"
-cmd=$(echo "$cmd" | sed 's/%/%%/g')
+# systemd expands %, $ and \ in ExecStart, so they are escaped to reach the agent as typed.
+cmd=$(printf '%s\n' "$cmd" | sed -e 's/\\/\\\\/g' -e 's/\$/$$/g' -e 's/%/%%/g')
 cat > "$ROOT$UNIT_DIR/$UNIT.d/10-install.conf" <<EOF
 # Written by install-agent.sh, run it again to change these flags.
 [Service]

@@ -46,9 +46,6 @@ func main() {
 			cfg.Servers = append(cfg.Servers, s)
 		}
 	}
-	if len(cfg.Servers) == 0 {
-		fatal("-server is required")
-	}
 	keyHex := os.Getenv("LASTGASP_KEY")
 	if *keyFile != "" {
 		b, err := os.ReadFile(*keyFile)
@@ -71,8 +68,11 @@ func main() {
 			fatal("cannot read hostname, use -hostname")
 		}
 	}
-	if !wire.ValidHost(cfg.Host) {
-		fatal("hostname %q is not valid: at most %d bytes of UTF-8, no spaces or control characters, use -hostname", cfg.Host, wire.MaxHostLen)
+	if err := cfg.Validate(); err != nil {
+		fatal("%v", err)
+	}
+	if *memLimit <= 0 {
+		fatal("-memory-limit must be above 0")
 	}
 
 	debug.SetMemoryLimit(*memLimit)

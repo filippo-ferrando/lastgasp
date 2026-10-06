@@ -28,6 +28,10 @@ check "$dropin" "-server logs.example.net:5140,10.0.0.2:5140 -key-file /etc/last
 [ "$(stat -c %a "$ROOT/etc/lastgasp/agent.key")" = 600 ] || fail "key file is not mode 600"
 [ "$(stat -c %a "$ROOT/etc/lastgasp")" = 700 ] || fail "config dir is not mode 700"
 
+# Characters systemd would expand are escaped.
+install -s a:1 -a '-x 50% -y $HOME -z a\b' || fail "install with args: $(cat "$TMP/out")"
+check "$dropin" '-x 50%% -y \$\$HOME -z a\\\\b'
+
 # Running again keeps the existing key.
 install -s logs.example.net:5140 || fail "reinstall: $(cat "$TMP/out")"
 [ "$(cat "$ROOT/etc/lastgasp/agent.key")" = "$key" ] || fail "key changed on reinstall"

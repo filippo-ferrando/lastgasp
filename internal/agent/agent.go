@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +32,42 @@ type Config struct {
 	MaxPstoreFile int64
 }
 
+// MaxBuffer bounds -buffer, as all slots are allocated and locked in memory at start.
+const MaxBuffer = 1 << 20
+
+// Validate checks the values that would make the agent misbehave later instead of failing at start.
+func (c *Config) Validate() error {
+	switch {
+	case len(c.Servers) == 0:
+		return errors.New("at least one server is required")
+	case !wire.ValidHost(c.Host):
+		return fmt.Errorf("hostname %q is not valid: at most %d bytes of UTF-8, no spaces or control characters", c.Host, wire.MaxHostLen)
+	case len(c.Key) < 16:
+		return errors.New("key must be at least 16 bytes")
+	case c.BufferSize < 1 || c.BufferSize > MaxBuffer:
+		return fmt.Errorf("buffer must be between 1 and %d", MaxBuffer)
+	case c.Rate < 0:
+		return errors.New("rate must not be negative")
+	case c.Heartbeat != 0 && c.Heartbeat < 100*time.Millisecond:
+		return errors.New("heartbeat must be 0 or at least 100ms")
+	case c.WaitAck && c.Heartbeat == 0:
+		return errors.New("wait-ack needs heartbeats, set -heartbeat or -wait-ack=false")
+	case c.ResolveEvery < time.Second:
+		return errors.New("resolve-every must be at least 1s")
+	}
+	for _, s := range c.Servers {
+		if _, _, err := net.SplitHostPort(s); err != nil {
+			return fmt.Errorf("server %q: %w", s, err)
+		}
+	}
+	if c.DNSServer != "" {
+		if _, _, err := net.SplitHostPort(c.DNSServer); err != nil {
+			return fmt.Errorf("dns %q: want ip:port: %w", c.DNSServer, err)
+		}
+	}
+	return nil
+}
+
 // Run starts all workers and blocks until ctx is done.
 func Run(ctx context.Context, cfg Config, log *Logger) error {
 	res, err := NewResolver(cfg.Servers, cfg.DNSServer)
@@ -42,7 +81,10 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	split := func(kind wire.Kind, e Entry, seq, fileID uint64) []Item {
 		parts := wire.SplitMessage(e.Msg, maxMsg)
 		if len(parts) > 255 {
+			// The part counter is one byte. The cut is counted like a drop, so it shows up on the server.
 			parts = parts[:255]
+			stats.BufferDrops.Add(1)
+			log.Printf("message of %d bytes cut to 255 parts", len(e.Msg))
 		}
 		items := make([]Item, len(parts))
 		for i, p := range parts {
@@ -97,22 +139,30 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	log.Printf("agent: host=%s boot=%s instance=%x servers=%s",
 		cfg.Host, wire.FormatBootID(sender.BootID), sender.Instance, strings.Join(cfg.Servers, ","))
 
-	done := make(chan struct{}, 3)
-	for name, fn := range map[string]func(context.Context){
+	workers := map[string]func(context.Context){
 		"sender":   sender.Run,
 		"kmsg":     kmsg.Run,
 		"resolver": func(ctx context.Context) { res.Run(ctx, cfg.ResolveEvery, log) },
-	} {
+	}
+	done := make(chan string, len(workers))
+	for name, fn := range workers {
 		go func() {
 			supervise(ctx, name, log, fn)
-			done <- struct{}{}
+			done <- name
 		}()
 	}
 	<-ctx.Done()
-	// The kmsg reader can stay blocked in read, so only wait briefly for the others.
-	select {
-	case <-done:
-	case <-time.After(time.Second):
+	// The sender drains its queue first. The kmsg reader can stay blocked in read, so it is not waited for.
+	limit := time.After(drainTime + time.Second)
+	for range len(workers) {
+		select {
+		case name := <-done:
+			if name == "sender" {
+				return nil
+			}
+		case <-limit:
+			return nil
+		}
 	}
 	return nil
 }

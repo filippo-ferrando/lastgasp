@@ -1,6 +1,8 @@
 <div align="center">
-  <img src="docs/logo.png" width="200" alt="lastgasp logo">
+  <img src="docs/logo.png" width="600" alt="lastgasp logo">
 </div>
+
+# Lastgasp
 
 A kernel log shipper for machines that are about to die.
 

@@ -1,4 +1,6 @@
-# lastgasp
+<div align="center">
+  <img src="docs/logo.png" width="200" alt="lastgasp logo">
+</div>
 
 A kernel log shipper for machines that are about to die.
 

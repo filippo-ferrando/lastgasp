@@ -42,6 +42,8 @@ const (
 	KindKmsg      Kind = 1
 	KindPstore    Kind = 2
 	KindHeartbeat Kind = 3
+	// KindAck goes from the server to the agent and answers a heartbeat.
+	KindAck Kind = 4
 )
 
 func (k Kind) String() string {
@@ -52,6 +54,8 @@ func (k Kind) String() string {
 		return "pstore"
 	case KindHeartbeat:
 		return "heartbeat"
+	case KindAck:
+		return "ack"
 	}
 	return fmt.Sprintf("kind(%d)", k)
 }
@@ -108,8 +112,17 @@ func MaxMsg(hostLen int) int {
 
 // runAEAD derives the AES-256-GCM cipher of one agent run, so each run has its own key.
 func runAEAD(key []byte, bootID [16]byte, instance uint64) (cipher.AEAD, error) {
-	info := make([]byte, 0, 32)
-	info = append(info, "lastgasp v2 "...)
+	return deriveAEAD(key, "lastgasp v2 ", bootID, instance)
+}
+
+// ackAEAD derives the cipher for acks. A key of its own keeps server nonces apart from agent nonces.
+func ackAEAD(key []byte, bootID [16]byte, instance uint64) (cipher.AEAD, error) {
+	return deriveAEAD(key, "lastgasp v2 ack ", bootID, instance)
+}
+
+func deriveAEAD(key []byte, label string, bootID [16]byte, instance uint64) (cipher.AEAD, error) {
+	info := make([]byte, 0, 40)
+	info = append(info, label...)
 	info = append(info, bootID[:]...)
 	info = binary.BigEndian.AppendUint64(info, instance)
 	sub, err := hkdf.Key(sha256.New, key, nil, string(info), 32)
@@ -175,15 +188,62 @@ func (s *Sealer) Seal(p *Packet) ([]byte, error) {
 		return nil, ErrTooLarge
 	}
 	ctr := s.counter.Add(1)
-	b := make([]byte, 0, MaxPacket)
-	b = append(b, magic...)
-	b = append(b, version, byte(len(s.host)))
-	b = append(b, s.host...)
-	b = append(b, s.bootID[:]...)
-	b = binary.BigEndian.AppendUint64(b, s.instance)
-	b = binary.BigEndian.AppendUint64(b, ctr)
+	b := header(s.host, s.bootID, s.instance, ctr)
 	// The clear header is authenticated as additional data.
 	return s.aead.Seal(b, nonce(ctr), inner, b), nil
+}
+
+func header(host string, bootID [16]byte, instance, ctr uint64) []byte {
+	b := make([]byte, 0, MaxPacket)
+	b = append(b, magic...)
+	b = append(b, version, byte(len(host)))
+	b = append(b, host...)
+	b = append(b, bootID[:]...)
+	b = binary.BigEndian.AppendUint64(b, instance)
+	return binary.BigEndian.AppendUint64(b, ctr)
+}
+
+// EncodeAck builds the server answer to the heartbeat p, sealed with the key of p's host.
+func EncodeAck(p *Packet, key []byte) ([]byte, error) {
+	a, err := ackAEAD(key, p.BootID, p.Instance)
+	if err != nil {
+		return nil, err
+	}
+	var r [8]byte
+	rand.Read(r[:])
+	ctr := binary.BigEndian.Uint64(r[:])
+	inner, err := encodeInner(&Packet{Kind: KindAck, Seq: p.Seq, SentAt: p.SentAt})
+	if err != nil {
+		return nil, err
+	}
+	b := header(p.Host, p.BootID, p.Instance, ctr)
+	return a.Seal(b, nonce(ctr), inner, b), nil
+}
+
+// DecodeAck checks an ack sent to the agent run (host, bootID, instance) and returns the heartbeat seq it answers.
+func DecodeAck(buf, key []byte, host string, bootID [16]byte, instance uint64) (uint64, error) {
+	h, err := parseHeader(buf)
+	if err != nil {
+		return 0, err
+	}
+	if h.host != host || h.bootID != bootID || h.instance != instance {
+		return 0, ErrAuth
+	}
+	a, err := ackAEAD(key, bootID, instance)
+	if err != nil {
+		return 0, err
+	}
+	inner, err := a.Open(nil, nonce(h.ctr), buf[h.len:], buf[:h.len])
+	if err != nil {
+		return 0, ErrAuth
+	}
+	r := reader{b: inner}
+	kind, seq := Kind(r.u8()), r.u64()
+	r.u64()
+	if r.bad || len(r.b) != 0 || kind != KindAck {
+		return 0, ErrMalformed
+	}
+	return seq, nil
 }
 
 // Encode encrypts a single packet with a random nonce counter. Agents use a Sealer instead.
@@ -216,6 +276,7 @@ func encodeInner(p *Packet) ([]byte, error) {
 		b = append(b, r.Part, r.Parts)
 		b = binary.BigEndian.AppendUint16(b, uint16(len(r.Msg)))
 		b = append(b, r.Msg...)
+	case KindAck:
 	case KindHeartbeat:
 		s := &p.Stats
 		for _, v := range []uint64{s.KmsgRead, s.KmsgOverruns, s.KmsgInvalid, s.BufferDrops, s.SendErrors, s.PstoreRecords, s.UptimeSec} {
@@ -228,37 +289,54 @@ func encodeInner(p *Packet) ([]byte, error) {
 	return b, nil
 }
 
-// Decode looks up the key with keyFor, checks and decrypts the packet, and parses it.
-func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
+type clearHeader struct {
+	host     string
+	bootID   [16]byte
+	instance uint64
+	ctr      uint64
+	len      int
+}
+
+func parseHeader(buf []byte) (clearHeader, error) {
+	var h clearHeader
 	if len(buf) < 6 || string(buf[:4]) != magic {
-		return nil, ErrMalformed
+		return h, ErrMalformed
 	}
 	if buf[4] != version {
-		return nil, ErrVersion
+		return h, ErrVersion
 	}
 	hostLen := int(buf[5])
-	hdrLen := headerFixed + hostLen
-	if hostLen == 0 || len(buf) < hdrLen+innerFixed+TagSize {
-		return nil, ErrMalformed
+	h.len = headerFixed + hostLen
+	if hostLen == 0 || len(buf) < h.len+innerFixed+TagSize {
+		return h, ErrMalformed
 	}
-	host := string(buf[6 : 6+hostLen])
-	if !ValidHost(host) {
-		return nil, ErrHost
+	h.host = string(buf[6 : 6+hostLen])
+	if !ValidHost(h.host) {
+		return h, ErrHost
 	}
-	key := keyFor(host)
+	hr := reader{b: buf[6+hostLen : h.len]}
+	copy(h.bootID[:], hr.take(16))
+	h.instance = hr.u64()
+	h.ctr = hr.u64()
+	return h, nil
+}
+
+// Decode looks up the key with keyFor, checks and decrypts the packet, and parses it.
+func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
+	h, err := parseHeader(buf)
+	if err != nil {
+		return nil, err
+	}
+	key := keyFor(h.host)
 	if key == nil {
 		return nil, ErrUnknownHost
 	}
-	p := &Packet{Host: host}
-	hr := reader{b: buf[6+hostLen : hdrLen]}
-	copy(p.BootID[:], hr.take(16))
-	p.Instance = hr.u64()
-	ctr := hr.u64()
+	p := &Packet{Host: h.host, BootID: h.bootID, Instance: h.instance}
 	a, err := runAEAD(key, p.BootID, p.Instance)
 	if err != nil {
 		return nil, err
 	}
-	inner, err := a.Open(nil, nonce(ctr), buf[hdrLen:], buf[:hdrLen])
+	inner, err := a.Open(nil, nonce(h.ctr), buf[h.len:], buf[:h.len])
 	if err != nil {
 		return nil, ErrAuth
 	}

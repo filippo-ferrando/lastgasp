@@ -217,3 +217,29 @@ func TestHostValidation(t *testing.T) {
 		t.Fatalf("want ErrHost, got %v", err)
 	}
 }
+
+func TestAckRoundTrip(t *testing.T) {
+	key := make([]byte, 32)
+	boot := [16]byte{1, 2, 3}
+	beat := &Packet{Host: "node", BootID: boot, Instance: 9, Seq: 42, Kind: KindHeartbeat}
+	b, err := EncodeAck(beat, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, err := DecodeAck(b, key, "node", boot, 9)
+	if err != nil || seq != 42 {
+		t.Fatalf("seq %d err %v", seq, err)
+	}
+	if _, err := DecodeAck(b, key, "node", boot, 10); err == nil {
+		t.Fatal("ack for another run accepted")
+	}
+	other := make([]byte, 32)
+	other[0] = 1
+	if _, err := DecodeAck(b, other, "node", boot, 9); err == nil {
+		t.Fatal("ack with wrong key accepted")
+	}
+	// An ack sent back to the server must not pass as an agent packet.
+	if _, err := Decode(b, func(string) []byte { return key }); err == nil {
+		t.Fatal("ack decoded as agent packet")
+	}
+}

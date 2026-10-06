@@ -185,11 +185,35 @@ type staticAddrs []*net.UDPAddr
 
 func (s staticAddrs) Addrs() []*net.UDPAddr { return s }
 
-// flakyConn fails the first n writes.
+// flakyConn fails the first n writes. Reads return what is put in acks, and block while it is nil.
 type flakyConn struct {
 	mu    sync.Mutex
 	fails int
 	sent  [][]byte
+	acks  chan []byte
+}
+
+func (f *flakyConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	ack, ok := <-f.acks
+	if !ok {
+		return 0, nil, net.ErrClosed
+	}
+	return copy(b, ack), nil, nil
+}
+
+func (f *flakyConn) packets(t *testing.T) []*wire.Packet {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*wire.Packet
+	for _, b := range f.sent {
+		p, err := wire.Decode(b, func(string) []byte { return testKey })
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func (f *flakyConn) WriteTo(b []byte, _ net.Addr) (int, error) {
@@ -353,5 +377,58 @@ func TestSenderSendsPstoreFirst(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "panic,trace,k2,k3" {
 		t.Fatalf("sent %v", got)
+	}
+}
+
+func TestSenderHoldsRecordsUntilAck(t *testing.T) {
+	conn := &flakyConn{acks: make(chan []byte, 1)}
+	q := NewQueue(10)
+	for _, m := range []string{"a", "b"} {
+		q.Push(Item{Kind: wire.KindKmsg, Rec: wire.Record{Msg: m}})
+	}
+	s := &Sender{Host: "h", Instance: 7, Key: testKey, Queue: q, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}, Heartbeat: 20 * time.Millisecond, WaitAck: true}
+	s.newConn = func() (packetConn, error) { return conn, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	time.Sleep(80 * time.Millisecond)
+	for _, p := range conn.packets(t) {
+		if p.Kind != wire.KindHeartbeat || p.Seq != 0 {
+			t.Fatalf("sent %v seq %d before any ack", p.Kind, p.Seq)
+		}
+	}
+	if q.Len() != 2 {
+		t.Fatalf("queue has %d records, want 2", q.Len())
+	}
+
+	// An ack for another agent run is ignored.
+	bad, _ := wire.EncodeAck(&wire.Packet{Host: "h", Instance: 8}, testKey)
+	conn.acks <- bad
+	time.Sleep(50 * time.Millisecond)
+	if q.Len() != 2 {
+		t.Fatal("records sent after an ack for another run")
+	}
+
+	ack, _ := wire.EncodeAck(&wire.Packet{Host: "h", Instance: 7}, testKey)
+	conn.acks <- ack
+	for q.Len() > 0 && ctx.Err() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	var msgs []string
+	var seqs []uint64
+	for _, p := range conn.packets(t) {
+		if p.Seq == 0 {
+			continue
+		}
+		seqs = append(seqs, p.Seq)
+		if p.Kind == wire.KindKmsg {
+			msgs = append(msgs, p.Record.Msg)
+		}
+	}
+	if strings.Join(msgs, ",") != "a,b" || seqs[0] != 1 {
+		t.Fatalf("sent %v with seqs %v", msgs, seqs)
 	}
 }

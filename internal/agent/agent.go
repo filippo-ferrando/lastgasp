@@ -24,6 +24,7 @@ type Config struct {
 	BufferSize    int
 	Rate          int
 	Heartbeat     time.Duration
+	WaitAck       bool
 	ResolveEvery  time.Duration
 	MaxPstoreFile int64
 }
@@ -82,7 +83,7 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	sender := &Sender{
 		Host: cfg.Host, BootID: ReadBootID(cfg.BootIDPath, log), Instance: randomUint64(),
 		Key: cfg.Key, Queue: queue, Pstore: pstoreQueue, Resolver: res, Stats: stats, Log: log,
-		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat,
+		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck,
 	}
 	kmsg := &KmsgReader{Path: cfg.KmsgPath, Stats: stats, Log: log,
 		OnEntry: func(e Entry) {

@@ -28,7 +28,7 @@ section h2 { margin: 0; padding: 10px 14px; font-size: 13px; text-transform: upp
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { font-weight: 600; font-size: 12px; color: var(--muted); }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr.click { cursor: pointer; }
 tr.click:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -208,6 +208,8 @@ async function reloadLogs() {
 }
 
 async function pollLogs() {
+  // after_id=0 means no filter on the server, so an empty view loads like a fresh page.
+  if (!newestId) return reloadLogs();
   const p = filterQuery();
   p.set("after_id", newestId);
   const recs = await getJSON("/api/logs?" + p);

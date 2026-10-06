@@ -71,6 +71,9 @@ func (t *Tracker) Observe(p *wire.Packet, now time.Time) bool {
 	t.dirty[k] = true
 	s.LastSeen = now
 
+	if p.Kind == wire.KindHeartbeat && p.Oldest > 0 {
+		s.forgetBelow(p.Oldest)
+	}
 	switch {
 	case p.Seq > s.MaxSeq:
 		if p.Seq > s.MaxSeq+1 {
@@ -93,6 +96,62 @@ func (t *Tracker) Observe(p *wire.Packet, now time.Time) bool {
 	}
 	s.Received++
 	return true
+}
+
+// forgetBelow drops missing ranges below oldest: the agent cannot send them again. They stay counted as missing.
+func (s *Stream) forgetBelow(oldest uint64) {
+	i := sort.Search(len(s.MissingSet), func(i int) bool { return s.MissingSet[i].To >= oldest })
+	s.MissingSet = s.MissingSet[i:]
+	if len(s.MissingSet) > 0 && s.MissingSet[0].From < oldest {
+		s.MissingSet[0].From = oldest
+	}
+	if len(s.MissingSet) == 0 {
+		s.MissingSet = nil
+	}
+}
+
+// Progress tells what arrived on a stream, for an ack: every packet up to upto except missing.
+// At most wire.MaxAckRanges ranges are given, upto stops before the first one left out.
+func (t *Tracker) Progress(k StreamKey) (upto uint64, missing []wire.Range) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := t.streams[k]
+	if s == nil {
+		return 0, nil
+	}
+	upto = s.MaxSeq
+	for i, r := range s.MissingSet {
+		if i == wire.MaxAckRanges {
+			upto = r.From - 1
+			break
+		}
+		missing = append(missing, wire.Range{From: r.From, To: r.To})
+	}
+	return upto, missing
+}
+
+// Unreceive marks a packet as missing again, after its record could not be stored, so the agent sends it again.
+func (t *Tracker) Unreceive(p *wire.Packet) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	k := StreamKey{p.Host, wire.FormatBootID(p.BootID), p.Instance}
+	s := t.streams[k]
+	if s == nil || p.Seq == 0 || p.Seq > s.MaxSeq {
+		return
+	}
+	i := sort.Search(len(s.MissingSet), func(i int) bool { return s.MissingSet[i].To >= p.Seq })
+	if i < len(s.MissingSet) && s.MissingSet[i].From <= p.Seq {
+		return
+	}
+	s.MissingSet = append(s.MissingSet, Range{})
+	copy(s.MissingSet[i+1:], s.MissingSet[i:])
+	s.MissingSet[i] = Range{p.Seq, p.Seq}
+	if len(s.MissingSet) > t.maxRanges {
+		s.MissingSet = append([]Range(nil), s.MissingSet[len(s.MissingSet)-t.maxRanges:]...)
+	}
+	s.Gaps++
+	s.Received--
+	t.dirty[k] = true
 }
 
 // takeMissing removes seq from the missing ranges and reports whether it was there.

@@ -24,6 +24,6 @@ lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last l
 | kmsg | the live kernel log, read from `/dev/kmsg` |
 | pstore | kernel logs saved in persistent memory or EFI variables before a crash, read after the next boot from `/sys/fs/pstore` |
 | sequence number | a counter in every packet of an agent run, used to find missing packets |
-| ack | the answer of the server to an agent heartbeat |
+| ack | the answer of the server to an agent heartbeat. It says which packets arrived, so the agent can send lost ones again |
 | incident | something worth a look: a crash, a reboot, a silent host or a kernel error |
 | target | where alerts go: a webhook or an email address list |

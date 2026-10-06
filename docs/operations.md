@@ -89,8 +89,8 @@ Also back up the key file, the auth file and the rules file. The agent keys are 
 | Part | Order and effect |
 | --- | --- |
 | server | upgrade first. The schema is upgraded on start. Agents hold records while it restarts and send them when it answers again |
-| agents | after the server. An agent that waits for acks needs a server that sends them, older servers do not |
-| wire format | packets have a version. Version 1 agents are refused (`lastgasp_packets_invalid_total{reason="version"}`) and must be upgraded |
+| agents | after the server. A server refuses packets of a newer version than its own (`reason="version"`), so a new agent never gets an ack from an old server |
+| wire format | packets have a version. The server accepts versions 2 and 3: version 2 agents work, but cannot send lost records again. Version 1 agents are refused (`lastgasp_packets_invalid_total{reason="version"}`) and must be upgraded |
 
 Agents can be upgraded by running the install script again. It replaces the binary atomically and restarts the service, keeping the key.
 
@@ -127,7 +127,7 @@ Agents can be upgraded by running the install script again. It replaces the bina
 
 ## Known limits
 
-- Acks tell the agent that a server listens, they are not a receipt for each record. Records sent in the 15 seconds before an agent notices a dead server are lost and show up as missing.
+- Records are sent again only while they are still in the agent buffer. A long outage at full rate, or an agent restart, can still lose records, and they show up as missing.
 - Basic auth has no logout: the browser keeps the login until it is closed.
 - Retention is by age only, there is no limit per host or by size.
 - A multi-line kernel message appears as one record in kmsg and as several lines in pstore, so those lines are not deduplicated against each other.

@@ -20,9 +20,10 @@ The agent assumes the machine can fail in every way while it runs. Its job is to
 
 | Failure | What the agent does |
 | --- | --- |
-| Disk fails | Static binary with no libc. Config, key, hostname and boot ID are read once at start. Memory is locked with `mlockall`, so no page is ever read back from disk. Its own logs go to stderr through a non-blocking writer, never to files. |
+| Disk fails | Static binary with no libc. Config, key, hostname and boot ID are read once at start. Memory is locked with `mlockall`, so no page is ever read back from disk: pages mapped at start (the binary too) are read in and locked at once, new memory is locked when first used. Its own logs go to stderr through a non-blocking writer, never to files. |
 | DNS or `/etc/resolv.conf` gone | Addresses are cached. A failed lookup never removes a known address. `-dns ip:port` skips `resolv.conf`, plain IPs skip DNS. |
-| Network down | Records wait in a fixed size ring buffer (`-buffer`). When it is full, the oldest records are dropped and counted. |
+| Network down | Records wait in a fixed size ring buffer (`-buffer`). When it is full, the oldest records are dropped: sent ones first, which most likely arrived, then unsent ones, which are counted. |
+| Packets lost on the way | Sent records stay in the buffer until a server confirms them. Records a server reports missing are sent again. See [Acks](#acks). |
 | No server listening yet | The agent holds its records and sends a probe every second until a server answers. See [Acks](#acks). |
 | Kernel overwrites its buffer | `EPIPE` from `/dev/kmsg` is counted and reading goes on with the oldest record left. |
 | `/dev/kmsg` read error | The device is opened again. Records already read are skipped, so the buffer is not filled with copies. |
@@ -36,7 +37,7 @@ The agent assumes the machine can fail in every way while it runs. Its job is to
 The agent has three workers, each restarted on panic:
 
 - **kmsg reader**: reads `/dev/kmsg` one record at a time and splits long messages into parts that fit one packet.
-- **sender**: takes records from the pstore queue first, then from the ring buffer, encrypts and sends them, paced by `-rate`. It sends a heartbeat every `-heartbeat`.
+- **sender**: takes records from the pstore queue first, then from the ring buffer, encrypts and sends them, paced by `-rate`. Records to send again go before new ones. It sends a heartbeat every `-heartbeat`, and earlier when half the buffer waits for a server to confirm it.
 - **resolver**: refreshes server addresses every `-resolve-every`.
 
 ## Packets
@@ -45,13 +46,13 @@ Each datagram holds one record, one heartbeat or one ack. It stays under 1400 by
 
 | Part | Clear or encrypted | Content |
 | --- | --- | --- |
-| header | clear, authenticated | magic `LGP1`, version 2, host name, boot ID, instance ID, nonce counter |
-| body | encrypted | kind, sequence number, send time, then the record (priority, kmsg sequence or pstore line, timestamp, pstore file ID, part, parts, text) or the heartbeat counters |
+| header | clear, authenticated | magic `LGP1`, version 3, host name, boot ID, instance ID, nonce counter |
+| body | encrypted | kind, sequence number, send time, then the record (priority, kmsg sequence or pstore line, timestamp, pstore file ID, part, parts, text) or the heartbeat counters and the oldest sequence number the agent can still send again |
 | tag | | 16 byte GCM tag |
 
 Only the host name, boot ID, instance ID and nonce counter travel in clear text, because the server needs them to pick the key. The key of each agent run is derived from the shared key with HKDF-SHA256 over the boot ID and the instance ID. Every packet uses a new nonce from a counter, so a nonce is never used twice with the same derived key. A changed header makes the packet fail.
 
-Version 1 packets (HMAC only, no encryption) are refused and counted as `version`.
+Version 2 packets (heartbeats without the oldest sequence number, acks without the receive state) are still accepted, so agents can be upgraded after the server. Version 1 packets (HMAC only, no encryption) are refused and counted as `version`.
 
 ## Sequence numbers
 
@@ -61,7 +62,7 @@ Every packet of an agent run has a sequence number, starting at 1. The number is
 
 UDP gives no delivery receipt. Without help, an agent that starts before the server, or before its key is in the server key file, would send its whole boot log into nothing.
 
-1. The server answers every valid heartbeat with an ack, sent from the listen port back to the address of the heartbeat.
+1. The server answers every valid heartbeat with an ack, sent from the listen port back to the address of the heartbeat. A heartbeat is answered once the batch it came in is stored, so the ack covers every record that arrived before it.
 2. The ack echoes the sequence number and send time of the heartbeat. It is encrypted with a key derived with a different HKDF label, so server and agent nonces never meet.
 3. The agent accepts an ack only for its own agent run and only when it answers one of its 16 newest heartbeats. A replayed old ack is ignored.
 4. Until an ack arrives, the agent holds its records and sends a **probe** every second: a heartbeat with sequence number 0. Probes get an ack but are not counted, so probes that nobody received do not show up as missing.
@@ -70,21 +71,31 @@ UDP gives no delivery receipt. Without help, an agent that starts before the ser
 
 The agent clock for acks is monotonic, so a clock step at boot (RTC wrong, NTP fixes it) does not change anything.
 
-Acks tell the agent that a server listens and knows its key. They are not a receipt for each record: records sent in the 15 seconds before the agent notices a dead server are lost and show up as missing. `-wait-ack=false` turns acks off, for networks where replies cannot reach the agent.
+### Sending lost records again
+
+An ack also says what arrived: every packet up to a sequence number, except a list of missing ranges (at most 32, the rest is left for the next ack).
+
+1. The agent keeps every sent record in its buffer until an ack covers it. Then the record is done.
+2. A record that an ack lists as missing is sent again with its first sequence number, so the server counts it as late. It is sent again only if its last send came before the heartbeat that the ack answers, so a record still on its way is not sent twice.
+3. Each heartbeat carries the oldest sequence number the agent still holds. The server forgets missing ranges below it: they stay counted as missing, but no ack asks for them again. Lost heartbeats and records pushed out of a full buffer end up there.
+4. When a record cannot be stored (the database is down for longer than the retries), the server marks its packet as missing again, so the agent sends it again.
+5. With several servers, the first ack that covers a record is enough.
+
+So records sent in the 15 seconds before the agent notices a dead server are not lost: when a server answers again, it lists them as missing and the agent sends them again, as long as they are still in the buffer. `-wait-ack=false` turns acks off, for networks where replies cannot reach the agent. Records are then done once sent.
 
 ## The server
 
-1. The UDP listener decodes each datagram, looks up the key of the host and decrypts it. Bad packets are counted by reason (`auth_failed`, `unknown_host`, `bad_host`, `malformed`, `version`) and dropped. Heartbeats get an ack.
+1. The UDP listener decodes each datagram, looks up the key of the host and decrypts it. Bad packets are counted by reason (`auth_failed`, `unknown_host`, `bad_host`, `malformed`, `version`) and dropped. Probes and version 2 heartbeats get an ack at once.
 2. Valid packets go into a queue of 65536 packets. When the queue is full, packets are dropped and counted (`lastgasp_server_queue_dropped_total`).
-3. A worker takes packets in batches of up to 512, updates the gap tracker, saves new boots and writes the records in one transaction. A failed write is retried 5 times with backoff.
-4. The incident detector looks at every stored kernel line, at new boots and at hosts that stopped sending.
+3. A worker takes packets in batches of up to 512, updates the gap tracker, saves new boots and writes the records in one transaction. A failed write is retried 5 times with backoff. Then the heartbeats of the batch get their ack.
+4. The incident detector looks at every stored kernel line, at new boots and at hosts that stopped sending. Its slow queries (the crash check, the last line of a silent host) run without its lock, so the worker never waits for them.
 5. Alert targets send incidents to webhooks and email, each with its own state and retries.
 
 On stop the server closes the UDP socket, finishes HTTP requests, writes every queued packet in full batches, saves the gap state and the incident changes, then closes the database.
 
 ## Missing packets
 
-For each agent run the server keeps the highest sequence number and the missing ranges.
+For each agent run the server keeps the highest sequence number and the missing ranges. Ranges the agent can no longer send again are dropped from the list, but stay counted.
 
 | Counter | Meaning |
 | --- | --- |

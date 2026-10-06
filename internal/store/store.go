@@ -176,6 +176,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			`CREATE INDEX IF NOT EXISTS incidents_closed ON incidents (closed_at)`,
 			`CREATE INDEX IF NOT EXISTS alerts_target ON alerts (target, state)`,
 		},
+		{
+			// Boots removed by retention, so one that sends again is not taken for a new boot.
+			`CREATE TABLE IF NOT EXISTS retired_boots (
+				host TEXT NOT NULL,
+				boot_id TEXT NOT NULL,
+				PRIMARY KEY (host, boot_id))`,
+		},
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
 		return err
@@ -232,10 +239,12 @@ func (s *Store) q(query string) string {
 }
 
 // RecordBoot remembers when a boot was first seen and reports whether it was new.
-// Calling it again for a known boot does nothing.
+// Calling it again for a known boot, or for a boot removed by retention, does nothing.
 func (s *Store) RecordBoot(ctx context.Context, host, boot string, seen time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO boots (host, boot_id, first_seen) VALUES (?, ?, ?)
-		ON CONFLICT (host, boot_id) DO NOTHING`), host, boot, seen.UnixNano())
+	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO boots (host, boot_id, first_seen)
+		SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS BIGINT)
+		WHERE NOT EXISTS (SELECT 1 FROM retired_boots WHERE host = ? AND boot_id = ?)
+		ON CONFLICT (host, boot_id) DO NOTHING`), host, boot, seen.UnixNano(), host, boot)
 	if err != nil {
 		return false, err
 	}
@@ -272,11 +281,18 @@ func (s *Store) PstoreBoot(ctx context.Context, host, fileID, currentBoot string
 	if boot == "" {
 		boot = "unknown"
 	}
+	return s.assignPstore(ctx, host, fileID, boot)
+}
+
+// assignPstore saves boot as the boot of a pstore file and returns the saved one. When another
+// server sharing the database saved the file first, its answer wins.
+func (s *Store) assignPstore(ctx context.Context, host, fileID, boot string) (string, error) {
 	if _, err := s.db.ExecContext(ctx, s.q(`INSERT INTO pstore_files (host, file_id, boot_id) VALUES (?, ?, ?)
 		ON CONFLICT (host, file_id) DO NOTHING`), host, fileID, boot); err != nil {
 		return "", err
 	}
-	return boot, nil
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT boot_id FROM pstore_files WHERE host = ? AND file_id = ?`), host, fileID).Scan(&boot)
+	return boot, err
 }
 
 // InsertBatch stores records in one transaction and reports which ones were new. New records get their ID set.
@@ -454,14 +470,28 @@ func (s *Store) DeleteRecordsBefore(ctx context.Context, t time.Time) (int64, er
 }
 
 // DeleteBootsBefore removes boots first seen before t, but keeps the newest boot of each host
-// so pstore files of the next boot can still be assigned.
+// so pstore files of the next boot can still be assigned. Removed boots are remembered as retired.
 func (s *Store) DeleteBootsBefore(ctx context.Context, t time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM boots WHERE first_seen < ? AND first_seen <
-		(SELECT MAX(b.first_seen) FROM boots b WHERE b.host = boots.host)`), t.UnixNano())
+	const old = `FROM boots WHERE first_seen < ? AND first_seen <
+		(SELECT MAX(b.first_seen) FROM boots b WHERE b.host = boots.host)`
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO retired_boots (host, boot_id) SELECT host, boot_id `+old+`
+		ON CONFLICT (host, boot_id) DO NOTHING`), t.UnixNano()); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, s.q(`DELETE `+old), t.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
 }
 
 // LoadStreams returns every saved stream state.

@@ -578,3 +578,34 @@ func TestCrashCheckWaitsForDatabase(t *testing.T) {
 		t.Fatal("crash not found after the database came back")
 	}
 }
+
+func TestTickQueriesRunWithoutLock(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.add(t, "h", "b1", "kmsg", e.t0, "Kernel panic - not syncing: x")
+	e.d.NewBoot(ctx, "h", "b2", "b1", e.t0.Add(time.Minute))
+	e.add(t, "other", "o1", "kmsg", e.t0, "quiet host")
+	free := false
+	e.d.unlocked = func() {
+		if e.d.mu.TryLock() {
+			free = true
+			e.d.mu.Unlock()
+		}
+		// The ingest worker can go on while the crash check and the silent check query the database.
+		e.d.Seen("other", "o1", e.t0.Add(3*time.Minute))
+	}
+	e.d.Tick(ctx, e.t0.Add(3*time.Minute))
+	if !free {
+		t.Fatal("lock held during the queries")
+	}
+	var crash bool
+	for _, i := range e.incidents(t) {
+		crash = crash || i.Kind == KindCrash
+		if i.Kind == KindSilent && i.Host == "other" {
+			t.Fatal("silent incident opened for a host that sent during the check")
+		}
+	}
+	if !crash {
+		t.Fatal("crash not found")
+	}
+}

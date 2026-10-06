@@ -21,6 +21,7 @@ The agent assumes the worst: dead disk, broken DNS, no memory, kernel panic. It'
 - reads `/dev/kmsg` and, after a crash, the logs the kernel saved in pstore
 - encrypts every line with AES-256-GCM and sends it over UDP, one line per packet
 - holds lines in memory until a server actually answers, so starting the agent before the server (or before you add its key) loses nothing
+- keeps each line until a server confirms it got it, and sends lost lines again
 - survives dead disks, DNS outages, OOM, journald hangs and its own bugs
 
 **Server** (`lastgasp-server`)
@@ -66,7 +67,7 @@ echo 1 > /proc/sys/kernel/sysrq; echo c > /proc/sysrq-trigger     # real kernel 
                                                     └──► web UI, API, /metrics
 ```
 
-Every packet has a sequence number, so the server knows exactly what it missed. The server answers heartbeats with acks, and the agent only sends logs while a server is answering. When a machine reboots, the server waits a bit for the crash logs from pstore, then decides whether it was a clean reboot or a crash.
+Every packet has a sequence number, so the server knows exactly what it missed. The server answers heartbeats with acks that say what arrived, the agent sends again what got lost, and it only sends logs while a server is answering. When a machine reboots, the server waits a bit for the crash logs from pstore, then decides whether it was a clean reboot or a crash.
 
 The longer version, with the packet format and all the details, is in [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -114,7 +115,7 @@ docs/                  documentation
 
 I try to be honest about what it doesn't do (yet):
 
-- UDP has no receipts. Acks tell the agent a server is listening, but if the server dies, the agent needs about 15 seconds to notice, and what it sent in between is gone (it shows up as missing, at least).
+- Lost lines are sent again only while they are still in the agent buffer. A long outage at full rate, or an agent restart, can still lose some (they show up as missing, at least).
 - A kernel panic stops everything instantly, the agent included. The panic message itself only reaches you through pstore, so set up a pstore backend (EFI or ramoops) on machines you care about.
 - Retention is by age only.
 - Basic auth has no logout button. Put HTTPS in front of the UI.

@@ -221,25 +221,81 @@ func TestHostValidation(t *testing.T) {
 func TestAckRoundTrip(t *testing.T) {
 	key := make([]byte, 32)
 	boot := [16]byte{1, 2, 3}
-	beat := &Packet{Host: "node", BootID: boot, Instance: 9, Seq: 42, SentAt: 777, Kind: KindHeartbeat}
-	b, err := EncodeAck(beat, key)
+	beat := &Packet{Version: version, Host: "node", BootID: boot, Instance: 9, Seq: 42, SentAt: 777, Kind: KindHeartbeat}
+	missing := []Range{{3, 4}, {10, 10}}
+	b, err := EncodeAck(beat, 40, missing, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq, sentAt, err := DecodeAck(b, key, "node", boot, 9)
-	if err != nil || seq != 42 || sentAt != 777 {
-		t.Fatalf("seq %d sent at %d err %v", seq, sentAt, err)
+	ack, err := DecodeAck(b, key, "node", boot, 9)
+	if err != nil || ack.Seq != 42 || ack.SentAt != 777 || ack.Upto != 40 || len(ack.Missing) != 2 || ack.Missing[1] != (Range{10, 10}) {
+		t.Fatalf("ack %+v err %v", ack, err)
 	}
-	if _, _, err := DecodeAck(b, key, "node", boot, 10); err == nil {
+	if _, err := DecodeAck(b, key, "node", boot, 10); err == nil {
 		t.Fatal("ack for another run accepted")
 	}
 	other := make([]byte, 32)
 	other[0] = 1
-	if _, _, err := DecodeAck(b, other, "node", boot, 9); err == nil {
+	if _, err := DecodeAck(b, other, "node", boot, 9); err == nil {
 		t.Fatal("ack with wrong key accepted")
 	}
 	// An ack sent back to the server must not pass as an agent packet.
 	if _, err := Decode(b, func(string) []byte { return key }); err == nil {
 		t.Fatal("ack decoded as agent packet")
+	}
+	if _, err := EncodeAck(beat, 100, make([]Range, MaxAckRanges+1), key); err == nil {
+		t.Fatal("too many ranges accepted")
+	}
+	// Ranges out of order or above Upto are refused.
+	for _, bad := range [][]Range{{{5, 4}}, {{3, 4}, {4, 6}}, {{30, 50}}} {
+		b, _ := EncodeAck(beat, 40, bad, key)
+		if _, err := DecodeAck(b, key, "node", boot, 9); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ranges %v: want ErrMalformed, got %v", bad, err)
+		}
+	}
+}
+
+func TestAckWithAllRangesFits(t *testing.T) {
+	beat := &Packet{Host: strings.Repeat("h", MaxHostLen), Seq: 1, Kind: KindHeartbeat}
+	missing := make([]Range, MaxAckRanges)
+	for i := range missing {
+		missing[i] = Range{uint64(i * 2), uint64(i * 2)}
+	}
+	b, err := EncodeAck(beat, 1000, missing, testKey)
+	if err != nil || len(b) > MaxPacket {
+		t.Fatalf("ack of %d bytes, err %v", len(b), err)
+	}
+}
+
+func TestVersionTwoStillAccepted(t *testing.T) {
+	// Agents upgraded after the server still send version 2, without Oldest.
+	p := samplePacket()
+	p.Version, p.Kind, p.Record, p.Oldest = minVersion, KindHeartbeat, Record{}, 5
+	b, err := Encode(p, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(b, keyFor)
+	if err != nil || got.Version != minVersion || got.Oldest != 0 {
+		t.Fatalf("got %+v err %v", got, err)
+	}
+	// Their acks stay version 2, which old agents can read: no receive state follows the heartbeat fields.
+	ack, err := EncodeAck(got, 9, []Range{{1, 2}}, testKey)
+	if err != nil || ack[4] != minVersion {
+		t.Fatalf("ack version %d err %v", ack[4], err)
+	}
+	a, err := DecodeAck(ack, testKey, p.Host, p.BootID, p.Instance)
+	if err != nil || a.Upto != 0 || a.Missing != nil {
+		t.Fatalf("ack %+v err %v", a, err)
+	}
+}
+
+func TestHeartbeatCarriesOldest(t *testing.T) {
+	p := samplePacket()
+	p.Kind, p.Record, p.Oldest = KindHeartbeat, Record{}, 1234
+	b, _ := Encode(p, testKey)
+	got, err := Decode(b, keyFor)
+	if err != nil || got.Version != version || got.Oldest != 1234 {
+		t.Fatalf("got %+v err %v", got, err)
 	}
 }

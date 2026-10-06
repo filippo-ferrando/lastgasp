@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -31,7 +32,7 @@ type Ingestor struct {
 	// Detector is told about packets, new boots and stored records. It may be nil.
 	Detector *incident.Detector
 
-	ch          chan *wire.Packet
+	ch          chan inbound
 	boots       map[string]bool   // host|boot already saved
 	lastBoot    time.Time         // first_seen of the newest saved boot
 	pstoreBoots map[string]string // host|file -> boot
@@ -39,6 +40,14 @@ type Ingestor struct {
 
 	ackMu   sync.Mutex
 	lastAck map[ackKey]time.Time // per agent run, limits acks to one per ackEvery
+	// reply sends acks of version 3 heartbeats, which go out after their batch is stored.
+	reply atomic.Pointer[func(b []byte, to net.Addr)]
+}
+
+// inbound is a checked packet and the address it came from.
+type inbound struct {
+	p    *wire.Packet
+	from net.Addr
 }
 
 type ackKey struct {
@@ -55,13 +64,14 @@ const cacheLimit = 100000
 
 func NewIngestor(st *store.Store, tr *Tracker, keys KeyLookup, m *Metrics, log *slog.Logger) *Ingestor {
 	return &Ingestor{Store: st, Tracker: tr, Keys: keys, Metrics: m, Log: log,
-		ch: make(chan *wire.Packet, 65536), boots: map[string]bool{}, pstoreBoots: map[string]string{}, now: time.Now,
+		ch: make(chan inbound, 65536), boots: map[string]bool{}, pstoreBoots: map[string]string{}, now: time.Now,
 		lastAck: map[ackKey]time.Time{}}
 }
 
 // Handle checks one datagram and queues it. It never blocks; a full queue drops the packet.
-// It returns the ack to send back for a heartbeat, or nil.
-func (in *Ingestor) Handle(b []byte) []byte {
+// It returns the ack to send back at once, or nil. A version 3 heartbeat is answered after its
+// batch is stored, so the ack can tell what arrived.
+func (in *Ingestor) Handle(b []byte, from net.Addr) []byte {
 	p, err := wire.Decode(b, in.Keys.Lookup)
 	if err != nil {
 		reason := "malformed"
@@ -81,7 +91,7 @@ func (in *Ingestor) Handle(b []byte) []byte {
 	// Seq 0 is a probe: the agent asks if a server is there, before it sends its records.
 	if p.Kind != wire.KindHeartbeat || p.Seq != 0 {
 		select {
-		case in.ch <- p:
+		case in.ch <- inbound{p, from}:
 		default:
 			in.Metrics.QueueDropped.Inc()
 			return nil
@@ -92,7 +102,15 @@ func (in *Ingestor) Handle(b []byte) []byte {
 	}
 	if p.Seq == 0 {
 		in.Metrics.Probes.Inc()
+	} else if p.Version >= 3 {
+		return nil
 	}
+	// A probe ack tells nothing about records: the probe is not tracked.
+	return in.ack(p, 0, nil)
+}
+
+// ack builds the answer to the heartbeat p, or nil when the limit per agent run is reached.
+func (in *Ingestor) ack(p *wire.Packet, upto uint64, missing []wire.Range) []byte {
 	if !in.ackAllowed(ackKey{p.Host, p.BootID, p.Instance}) {
 		return nil
 	}
@@ -100,7 +118,7 @@ func (in *Ingestor) Handle(b []byte) []byte {
 	if key == nil {
 		return nil
 	}
-	ack, err := wire.EncodeAck(p, key)
+	ack, err := wire.EncodeAck(p, upto, missing, key)
 	if err != nil {
 		return nil
 	}
@@ -123,6 +141,8 @@ func (in *Ingestor) ackAllowed(k ackKey) bool {
 
 // Listen reads datagrams from conn until it is closed.
 func (in *Ingestor) Listen(conn net.PacketConn) error {
+	reply := func(b []byte, to net.Addr) { conn.WriteTo(b, to) }
+	in.SetReply(reply)
 	buf := make([]byte, 65536)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
@@ -133,18 +153,21 @@ func (in *Ingestor) Listen(conn net.PacketConn) error {
 			in.Log.Warn("udp read", "err", err)
 			continue
 		}
-		if ack := in.Handle(buf[:n]); ack != nil {
+		if ack := in.Handle(buf[:n], addr); ack != nil {
 			// A lost ack is fine: the agent sends the next heartbeat soon.
 			conn.WriteTo(ack, addr)
 		}
 	}
 }
 
+// SetReply sets where acks sent after storing go. Listen sets it to its socket.
+func (in *Ingestor) SetReply(fn func(b []byte, to net.Addr)) { in.reply.Store(&fn) }
+
 // Run processes queued packets in batches and saves gap state, until ctx is done.
 func (in *Ingestor) Run(ctx context.Context) {
 	save := time.NewTicker(5 * time.Second)
 	defer save.Stop()
-	batch := make([]*wire.Packet, 0, 512)
+	batch := make([]inbound, 0, 512)
 	// Packets already marked as received must reach the database, so writes are not cut by shutdown.
 	work := context.WithoutCancel(ctx)
 	for {
@@ -172,7 +195,7 @@ func (in *Ingestor) Run(ctx context.Context) {
 }
 
 // drain stores the packets still queued, in full batches.
-func (in *Ingestor) drain(ctx context.Context, batch []*wire.Packet) {
+func (in *Ingestor) drain(ctx context.Context, batch []inbound) {
 	for {
 		batch = batch[:0]
 	fill:
@@ -191,10 +214,15 @@ func (in *Ingestor) drain(ctx context.Context, batch []*wire.Packet) {
 	}
 }
 
-func (in *Ingestor) process(ctx context.Context, batch []*wire.Packet) {
+func (in *Ingestor) process(ctx context.Context, batch []inbound) {
 	now := in.now()
 	recs := make([]*store.Record, 0, len(batch))
-	for _, p := range batch {
+	pkts := make([]*wire.Packet, 0, len(batch))
+	// The newest version 3 heartbeat of each agent run, answered once the batch is stored.
+	beats := map[ackKey]inbound{}
+	defer func() { in.sendAcks(beats) }()
+	for _, b := range batch {
+		p := b.p
 		if !in.Tracker.Observe(p, now) {
 			continue
 		}
@@ -207,6 +235,9 @@ func (in *Ingestor) process(ctx context.Context, batch []*wire.Packet) {
 			in.Detector.Seen(p.Host, boot, now)
 		}
 		if p.Kind == wire.KindHeartbeat {
+			if k := (ackKey{p.Host, p.BootID, p.Instance}); p.Version >= 3 && p.Seq > beats[k].seq() {
+				beats[k] = b
+			}
 			continue
 		}
 		r := &p.Record
@@ -230,14 +261,19 @@ func (in *Ingestor) process(ctx context.Context, batch []*wire.Packet) {
 		}
 		rec.ContentKey = contentKey(rec)
 		recs = append(recs, rec)
+		pkts = append(pkts, p)
 	}
 	if len(recs) == 0 {
 		return
 	}
 	inserted, err := in.insert(ctx, recs)
 	if err != nil {
+		// The packets count as missing again, so agents that still hold them send them again.
 		in.Log.Error("store records, batch lost", "records", len(recs), "err", err)
 		in.Metrics.LostToStore.Add(float64(len(recs)))
+		for _, p := range pkts {
+			in.Tracker.Unreceive(p)
+		}
 		return
 	}
 	if in.Detector != nil {
@@ -248,6 +284,27 @@ func (in *Ingestor) process(ctx context.Context, batch []*wire.Packet) {
 			in.Metrics.Stored.WithLabelValues(r.Host, r.Source).Inc()
 		} else {
 			in.Metrics.Deduplicated.WithLabelValues(r.Host, r.Source).Inc()
+		}
+	}
+}
+
+func (b inbound) seq() uint64 {
+	if b.p == nil {
+		return 0
+	}
+	return b.p.Seq
+}
+
+// sendAcks answers heartbeats with what their agent run has delivered so far.
+func (in *Ingestor) sendAcks(beats map[ackKey]inbound) {
+	reply := in.reply.Load()
+	if reply == nil {
+		return
+	}
+	for k, b := range beats {
+		upto, missing := in.Tracker.Progress(StreamKey{k.host, wire.FormatBootID(k.bootID), k.instance})
+		if ack := in.ack(b.p, upto, missing); ack != nil {
+			(*reply)(ack, b.from)
 		}
 	}
 }

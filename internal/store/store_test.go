@@ -24,7 +24,7 @@ func openStores(t *testing.T) map[string]*Store {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, tbl := range []string{"records", "boots", "pstore_files", "streams", "incidents", "alerts"} {
+		for _, tbl := range []string{"records", "boots", "pstore_files", "streams", "incidents", "alerts", "retired_boots"} {
 			pg.db.Exec("DELETE FROM " + tbl)
 		}
 		t.Cleanup(func() { pg.Close() })
@@ -352,6 +352,28 @@ func TestDeleteOldRecordsAndBoots(t *testing.T) {
 			hosts, _ := s.Hosts(ctx)
 			if len(hosts) != 2 || hosts[0].LastBoot != "b" || hosts[0].Boots != 1 {
 				t.Fatalf("hosts %+v", hosts)
+			}
+			// A removed boot that sends again is not a new boot, and does not become the newest one.
+			if n, err := s.RecordBoot(ctx, "h1", "a", now); err != nil || n {
+				t.Fatalf("retired boot reported as new: %v %v", n, err)
+			}
+			if hosts, _ := s.Hosts(ctx); hosts[0].LastBoot != "b" {
+				t.Fatalf("hosts %+v", hosts)
+			}
+		})
+	}
+}
+
+func TestPstoreAssignmentKeepsFirstAnswer(t *testing.T) {
+	for name, s := range openStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			// Two servers both missed the file and computed different boots: the one saved first wins.
+			if b, err := s.assignPstore(ctx, "h1", "f1", "boot-a"); err != nil || b != "boot-a" {
+				t.Fatalf("got %q %v", b, err)
+			}
+			if b, err := s.assignPstore(ctx, "h1", "f1", "boot-b"); err != nil || b != "boot-a" {
+				t.Fatalf("second server got %q %v", b, err)
 			}
 		})
 	}

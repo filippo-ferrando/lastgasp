@@ -145,7 +145,7 @@ The schema has a version and is upgraded on start, in a transaction, for both da
 
 ## Retention
 
-With `-retain`, a cleanup runs one minute after start and then every hour. It deletes records, closed incidents, boots and agent runs older than the limit, in batches. The newest boot of each host is always kept, so crash logs sent by the next boot still find their boot.
+With `-retain`, a cleanup runs one minute after start and then every hour. It deletes records, closed incidents, boots and agent runs older than the limit, in batches. The newest boot of each host is always kept, so crash logs sent by the next boot still find their boot. Removed boots are remembered by name only, so a boot that sends again after its removal (a replay, or a machine with a wrong boot ID) is not taken for a new boot.
 
 SQLite does not give space back to the file system: it reuses it for new records. To shrink the file, stop the server and run `sqlite3 lastgasp.db VACUUM`.
 

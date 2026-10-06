@@ -37,6 +37,7 @@ type Sender struct {
 	conn    packetConn
 	sealer  *wire.Sealer
 	seq     uint64
+	tx      uint64 // packets written, including probes and records sent again
 	start   time.Time
 	pace    pacer
 	lastAck atomic.Int64 // time since start of the newest valid ack, monotonic so clock steps at boot do not matter
@@ -44,12 +45,21 @@ type Sender struct {
 	state   string // "", "holding" or "sending", to log only changes
 
 	beatMu sync.Mutex
-	beats  [16]int64 // SentAt of the newest heartbeats, an ack must answer one of them
+	beats  [16]beatSent // the newest heartbeats, an ack must answer one of them
 	nbeat  int
+}
+
+type beatSent struct {
+	sentAt int64
+	tx     uint64
 }
 
 // ackWindow is how long the agent keeps sending after the newest ack, in heartbeats.
 const ackWindow = 3
+
+// earlyBeat is the shortest gap between heartbeats sent early to get records confirmed. The server
+// answers at most every 200ms.
+const earlyBeat = 250 * time.Millisecond
 
 var errNoAddr = errors.New("no server address known yet")
 
@@ -102,23 +112,23 @@ func (s *Sender) logState(ready bool) {
 	}
 }
 
-func (s *Sender) noteBeat(sentAt int64) {
+func (s *Sender) noteBeat(sentAt int64, tx uint64) {
 	s.beatMu.Lock()
-	s.beats[s.nbeat%len(s.beats)] = sentAt
+	s.beats[s.nbeat%len(s.beats)] = beatSent{sentAt, tx}
 	s.nbeat++
 	s.beatMu.Unlock()
 }
 
-// recentBeat reports whether sentAt belongs to one of the newest heartbeats, so a replayed old ack is refused.
-func (s *Sender) recentBeat(sentAt int64) bool {
+// recentBeat finds the transmission of one of the newest heartbeats by its SentAt, so a replayed old ack is refused.
+func (s *Sender) recentBeat(sentAt int64) (tx uint64, ok bool) {
 	s.beatMu.Lock()
 	defer s.beatMu.Unlock()
 	for _, b := range s.beats {
-		if b != 0 && b == sentAt {
-			return true
+		if b.sentAt != 0 && b.sentAt == sentAt {
+			return b.tx, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // readAcks reads server answers until c is closed.
@@ -133,9 +143,20 @@ func (s *Sender) readAcks(c packetConn) {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		_, sentAt, err := wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance)
-		if err != nil || !s.recentBeat(sentAt) {
+		ack, err := wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance)
+		if err != nil {
 			continue
+		}
+		tx, ok := s.recentBeat(ack.SentAt)
+		if !ok {
+			continue
+		}
+		if ack.Upto > 0 {
+			for _, q := range []*Queue{s.Pstore, s.Queue} {
+				if q != nil {
+					q.Ack(ack.Upto, ack.Missing, tx)
+				}
+			}
 		}
 		s.lastAck.Store(int64(time.Since(s.start)) + 1)
 		select {
@@ -155,13 +176,13 @@ func (s *Sender) Run(ctx context.Context) {
 		return
 	}
 	retry := newBackoff(50*time.Millisecond, 2*time.Second)
-	nextBeat := time.Now()
+	nextBeat, lastBeat := time.Now(), time.Time{}
 	for ctx.Err() == nil {
 		ready := s.ready()
 		s.logState(ready)
-		if s.Heartbeat > 0 && !time.Now().Before(nextBeat) {
+		if s.Heartbeat > 0 && (!time.Now().Before(nextBeat) || (ready && s.needConfirm() && time.Since(lastBeat) >= earlyBeat)) {
 			// A failed heartbeat is not retried: the next one carries newer counters.
-			beat := &wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start))}
+			beat := &wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start)), Oldest: s.oldest()}
 			if ready {
 				s.send(beat)
 				nextBeat = time.Now().Add(s.Heartbeat)
@@ -170,37 +191,32 @@ func (s *Sender) Run(ctx context.Context) {
 				s.write(beat)
 				nextBeat = time.Now().Add(min(time.Second, s.Heartbeat))
 			}
-			s.noteBeat(beat.SentAt)
+			s.noteBeat(beat.SentAt, s.tx)
+			lastBeat = time.Now()
 		}
 		if !ready {
 			s.wait(ctx, time.Until(nextBeat), false)
 			continue
 		}
-		q := s.Queue
-		it, ok := Item{}, false
-		if s.Pstore != nil {
-			it, ok = s.Pstore.Peek()
-			q = s.Pstore
-		}
+		q, it, ok := s.next()
 		if !ok {
-			q = s.Queue
-			it, ok = q.Peek()
-		}
-		if !ok {
-			s.wait(ctx, time.Until(nextBeat), true)
+			wake := time.Until(nextBeat)
+			if s.needConfirm() {
+				wake = min(wake, time.Until(lastBeat.Add(earlyBeat)))
+			}
+			s.wait(ctx, wake, true)
 			continue
 		}
-		err := s.send(&wire.Packet{Kind: it.Kind, Record: it.Rec})
+		err := s.sendItem(q, it)
 		switch {
 		case err == nil:
 			retry.Reset()
-			q.Done(it)
 			s.pace.wait(ctx)
 		case errors.Is(err, wire.ErrTooLarge), errors.Is(err, wire.ErrHost), errors.Is(err, wire.ErrKind):
 			// This record can never be sent, so drop it instead of blocking the queue forever.
 			s.Log.Printf("send: dropping record: %v", err)
 			s.Stats.BufferDrops.Add(1)
-			q.Done(it)
+			q.Drop(it)
 		default:
 			retry.Sleep(ctx)
 		}
@@ -221,23 +237,61 @@ func (s *Sender) drain() {
 	}
 	deadline := time.Now().Add(drainTime)
 	for time.Now().Before(deadline) {
-		q := s.Queue
-		it, ok := Item{}, false
-		if s.Pstore != nil {
-			q = s.Pstore
-			it, ok = q.Peek()
-		}
+		q, it, ok := s.next()
 		if !ok {
-			q = s.Queue
-			if it, ok = q.Peek(); !ok {
-				return
-			}
-		}
-		if err := s.send(&wire.Packet{Kind: it.Kind, Record: it.Rec}); err != nil {
 			return
 		}
-		q.Done(it)
+		if err := s.sendItem(q, it); err != nil {
+			return
+		}
 	}
+}
+
+// next picks the next record to send, pstore lines first.
+func (s *Sender) next() (*Queue, Item, bool) {
+	if s.Pstore != nil {
+		if it, ok := s.Pstore.Next(); ok {
+			return s.Pstore, it, true
+		}
+	}
+	it, ok := s.Queue.Next()
+	return s.Queue, it, ok
+}
+
+// sendItem sends a record, or sends it again with its first seq, so the server sees a late packet.
+func (s *Sender) sendItem(q *Queue, it Item) error {
+	p := &wire.Packet{Kind: it.Kind, Record: it.Rec}
+	var err error
+	if it.seq != 0 {
+		p.Seq = it.seq
+		err = s.write(p)
+	} else {
+		err = s.send(p)
+	}
+	if err == nil {
+		// Without acks nothing would ever confirm the record, so it is done once sent.
+		q.Sent(it, p.Seq, s.tx, s.WaitAck)
+	}
+	return err
+}
+
+// oldest returns the lowest seq the agent can still send again. Packets below it are never sent again.
+func (s *Sender) oldest() uint64 {
+	o := s.seq + 1
+	for _, q := range []*Queue{s.Pstore, s.Queue} {
+		if q == nil {
+			continue
+		}
+		if v := q.Oldest(); v != 0 && v < o {
+			o = v
+		}
+	}
+	return o
+}
+
+// needConfirm reports whether half the buffer waits for a server to confirm it, so a heartbeat should go now.
+func (s *Sender) needConfirm() bool {
+	return s.WaitAck && s.Queue.Unconfirmed() >= max(1, s.Queue.Cap()/2)
 }
 
 func (s *Sender) buffered() int {
@@ -280,6 +334,7 @@ func (s *Sender) send(p *wire.Packet) error {
 
 // write seals p and sends it to every server. It succeeds if at least one write worked.
 func (s *Sender) write(p *wire.Packet) error {
+	s.tx++
 	p.SentAt = time.Now().UnixNano()
 	b, err := s.sealer.Seal(p)
 	if err != nil {

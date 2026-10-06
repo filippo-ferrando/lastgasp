@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -150,7 +151,7 @@ func (e *env) send(t *testing.T, p *wire.Packet) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.in.Handle(b)
+	e.in.Handle(b, nil)
 }
 
 func (e *env) waitRecords(t *testing.T, want int) []store.Record {
@@ -237,8 +238,8 @@ func TestDedupAcrossRestartsAndPstore(t *testing.T) {
 func TestBadPacketsAreCounted(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
 	b, _ := wire.Encode(kmsgPkt(1, 1, 1, 0, 0, "x"), bytes.Repeat([]byte{2}, 32))
-	e.in.Handle(b)
-	e.in.Handle([]byte("garbage"))
+	e.in.Handle(b, nil)
+	e.in.Handle([]byte("garbage"), nil)
 	m := e.get(t, "/metrics")
 	if !strings.Contains(m, `lastgasp_packets_invalid_total{reason="auth_failed"} 1`) ||
 		!strings.Contains(m, `lastgasp_packets_invalid_total{reason="malformed"} 1`) {
@@ -246,19 +247,55 @@ func TestBadPacketsAreCounted(t *testing.T) {
 	}
 }
 
+// replies collects acks sent after storing.
+type replies struct {
+	mu   sync.Mutex
+	acks [][]byte
+}
+
+func (r *replies) add(b []byte, _ net.Addr) {
+	r.mu.Lock()
+	r.acks = append(r.acks, b)
+	r.mu.Unlock()
+}
+
+// wait returns the next ack, decoded for the run of p.
+func (r *replies) wait(t *testing.T, p *wire.Packet) wire.Ack {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		r.mu.Lock()
+		var b []byte
+		if len(r.acks) > 0 {
+			b, r.acks = r.acks[0], r.acks[1:]
+		}
+		r.mu.Unlock()
+		if b != nil {
+			ack, err := wire.DecodeAck(b, testKey, p.Host, p.BootID, p.Instance)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ack
+		}
+	}
+	t.Fatal("no ack")
+	return wire.Ack{}
+}
+
 func TestHeartbeatsGetAcksAndProbesAreNotCounted(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	r := &replies{}
+	e.in.SetReply(r.add)
 	handle := func(p *wire.Packet) []byte {
 		b, err := wire.Encode(p, testKey)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return e.in.Handle(b)
+		return e.in.Handle(b, nil)
 	}
 	probe := pkt("node-1", 1, 1, 0)
 	ack := handle(probe)
-	if seq, _, err := wire.DecodeAck(ack, testKey, "node-1", probe.BootID, 1); err != nil || seq != 0 {
-		t.Fatalf("probe ack seq %d err %v", seq, err)
+	if a, err := wire.DecodeAck(ack, testKey, "node-1", probe.BootID, 1); err != nil || a.Seq != 0 || a.Upto != 0 {
+		t.Fatalf("probe ack %+v err %v", a, err)
 	}
 	if handle(kmsgPkt(1, 1, 1, 1, 1, "m")) != nil {
 		t.Fatal("record packet got an ack")
@@ -268,14 +305,100 @@ func TestHeartbeatsGetAcksAndProbesAreNotCounted(t *testing.T) {
 		t.Fatal("second ack within the limit")
 	}
 	time.Sleep(ackEvery)
-	if ack := handle(pkt("node-1", 1, 1, 2)); ack == nil {
-		t.Fatal("heartbeat got no ack")
+	// A heartbeat is answered once its batch is stored.
+	beat := pkt("node-1", 1, 1, 2)
+	if handle(beat) != nil {
+		t.Fatal("heartbeat answered before it was stored")
+	}
+	if a := r.wait(t, beat); a.Seq != 2 || a.Upto != 2 || len(a.Missing) != 0 {
+		t.Fatalf("heartbeat ack %+v", a)
 	}
 	e.waitRecords(t, 1)
-	time.Sleep(50 * time.Millisecond)
 	s := e.tr.Snapshot()
 	if len(s) != 1 || s[0].Received != 2 || s[0].Duplicates != 0 || s[0].Missing() != 0 {
 		t.Fatalf("streams %+v", s)
+	}
+}
+
+func TestVersionTwoHeartbeatIsAnsweredAtOnce(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	p := pkt("node-1", 1, 1, 1)
+	p.Version = 2
+	b, _ := wire.Encode(p, testKey)
+	ack := e.in.Handle(b, nil)
+	if ack == nil || ack[4] != 2 {
+		t.Fatal("version 2 heartbeat not answered with a version 2 ack")
+	}
+}
+
+func TestAckTellsWhatArrived(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	r := &replies{}
+	e.in.SetReply(r.add)
+	// Packets 2 and 4 are lost.
+	e.send(t, kmsgPkt(1, 1, 1, 1, 1, "a"))
+	e.send(t, kmsgPkt(1, 1, 3, 3, 3, "c"))
+	beat := pkt("node-1", 1, 1, 5)
+	beat.Oldest = 1
+	e.send(t, beat)
+	if a := r.wait(t, beat); a.Upto != 5 || len(a.Missing) != 2 || a.Missing[0] != (wire.Range{From: 2, To: 2}) || a.Missing[1] != (wire.Range{From: 4, To: 4}) {
+		t.Fatalf("ack %+v", a)
+	}
+	// 2 is sent again; 4 is no longer held by the agent, so it is given up.
+	time.Sleep(ackEvery)
+	e.send(t, kmsgPkt(1, 1, 2, 2, 2, "b"))
+	beat = pkt("node-1", 1, 1, 6)
+	beat.Oldest = 6
+	e.send(t, beat)
+	if a := r.wait(t, beat); a.Upto != 6 || len(a.Missing) != 0 {
+		t.Fatalf("ack %+v", a)
+	}
+	e.waitRecords(t, 3)
+	s := e.tr.Snapshot()[0]
+	if s.Missing() != 1 || s.Recovered != 1 {
+		t.Fatalf("stream %+v", s)
+	}
+}
+
+func TestTrackerProgressAndForget(t *testing.T) {
+	tr := NewTracker()
+	now := time.Now()
+	k := StreamKey{"h", wire.FormatBootID([16]byte{1}), 1}
+	for seq := uint64(1); seq <= 2*wire.MaxAckRanges+10; seq += 2 {
+		tr.Observe(pkt("h", 1, 1, seq), now)
+	}
+	// Only the first ranges fit an ack, and upto stops before the others.
+	upto, missing := tr.Progress(k)
+	if len(missing) != wire.MaxAckRanges || upto != missing[len(missing)-1].To+1 {
+		t.Fatalf("upto %d, %d ranges", upto, len(missing))
+	}
+	// A heartbeat says nothing below 20 can come again.
+	beat := pkt("h", 1, 1, 100)
+	beat.Oldest = 20
+	tr.Observe(beat, now)
+	if _, missing = tr.Progress(k); missing[0].From != 20 {
+		t.Fatalf("ranges %v", missing)
+	}
+	if s := tr.Snapshot()[0]; s.Missing() != s.Gaps {
+		t.Fatal("forgotten ranges must stay counted as missing")
+	}
+}
+
+func TestTrackerUnreceive(t *testing.T) {
+	tr := NewTracker()
+	now := time.Now()
+	for _, seq := range []uint64{1, 2, 3} {
+		tr.Observe(pkt("h", 1, 1, seq), now)
+	}
+	tr.Unreceive(pkt("h", 1, 1, 2))
+	tr.Unreceive(pkt("h", 1, 1, 2))
+	s := tr.Snapshot()[0]
+	if s.Missing() != 1 || s.Received != 2 || len(s.MissingSet) != 1 || s.MissingSet[0] != (Range{2, 2}) {
+		t.Fatalf("stream %+v", s)
+	}
+	// Sent again, it counts as late, not as a duplicate.
+	if !tr.Observe(pkt("h", 1, 1, 2), now) {
+		t.Fatal("packet sent again refused")
 	}
 }
 
@@ -372,6 +495,88 @@ func TestAgentToServerOverUDP(t *testing.T) {
 	}
 	if recs[0].Message != "hello" || joined != long || recs[1].Parts != 3 {
 		t.Fatalf("records %+v", recs)
+	}
+	// The next heartbeat confirms every record, so the agent lets them go.
+	for deadline := time.Now().Add(5 * time.Second); q.Len() > 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if q.Len() != 0 {
+		t.Fatalf("%d records not confirmed", q.Len())
+	}
+}
+
+// lossyProxy forwards UDP between one agent and the server, and drops the first packet that drop picks.
+func lossyProxy(t *testing.T, server net.Addr, drop func([]byte) bool) net.Addr {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	go func() {
+		buf := make([]byte, 65536)
+		var agentAddr net.Addr
+		dropped := false
+		for {
+			n, from, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if from.String() == server.String() {
+				if agentAddr != nil {
+					conn.WriteTo(buf[:n], agentAddr)
+				}
+				continue
+			}
+			agentAddr = from
+			if !dropped && drop(buf[:n]) {
+				dropped = true
+				continue
+			}
+			conn.WriteTo(buf[:n], server)
+		}
+	}()
+	return conn.LocalAddr()
+}
+
+// TestAgentSendsLostRecordAgain loses one record on the way and checks that it still gets stored.
+func TestAgentSendsLostRecordAgain(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go e.in.Listen(conn)
+	defer conn.Close()
+	proxy := lossyProxy(t, conn.LocalAddr(), func(b []byte) bool {
+		p, err := wire.Decode(b, func(string) []byte { return testKey })
+		return err == nil && p.Kind == wire.KindKmsg && p.Record.Msg == "lost once"
+	})
+
+	res, err := agent.NewResolver([]string{proxy.String()}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := agent.NewQueue(100)
+	for i, msg := range []string{"first", "lost once", "last"} {
+		q.Push(agent.Item{Kind: wire.KindKmsg, Rec: wire.Record{Priority: 4, Seq: uint64(i), Part: 1, Parts: 1, Msg: msg}})
+	}
+	s := &agent.Sender{Host: "node-1", Instance: 1, Key: testKey, Queue: q, Resolver: res,
+		Stats: &agent.Stats{}, Log: agent.NewLogger(io.Discard, 10), Heartbeat: 300 * time.Millisecond, WaitAck: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Run(ctx)
+	defer cancel()
+
+	recs := e.waitRecords(t, 3)
+	if recs[2].Message != "lost once" {
+		t.Fatalf("records %+v", recs)
+	}
+	for deadline := time.Now().Add(5 * time.Second); q.Len() > 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	st := e.tr.Snapshot()[0]
+	if q.Len() != 0 || st.Missing() != 0 || st.Recovered != 1 {
+		t.Fatalf("queue %d, stream %+v", q.Len(), st)
 	}
 }
 
@@ -527,5 +732,34 @@ func TestBootsInOneBatchKeepTheirOrder(t *testing.T) {
 	l, _ := e.st.Incidents(context.Background(), store.IncidentFilter{Kind: "reboot"})
 	if len(l) != 1 {
 		t.Fatalf("reboot not detected: %+v", l)
+	}
+}
+
+// TestRetiredBootIsNoReboot replays a boot removed by retention, which must not look like a reboot.
+func TestRetiredBootIsNoReboot(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "db")
+	e := newEnv(t, db)
+	e.send(t, kmsgPkt(0xa, 1, 1, 0, 100, "boot a"))
+	e.waitRecords(t, 1)
+	e.send(t, kmsgPkt(0xb, 2, 1, 0, 100, "boot b"))
+	e.waitRecords(t, 2)
+	r := &Retention{Store: e.st, Tracker: e.tr, Detector: e.det, Metrics: e.metrics,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Age: time.Hour}
+	if err := r.RunOnce(context.Background(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	e.stop()
+
+	// After a restart, an old packet of boot a arrives again.
+	e2 := newEnv(t, db)
+	e2.send(t, kmsgPkt(0xa, 3, 1, 0, 100, "boot a"))
+	e2.waitRecords(t, 1)
+	l, _ := e2.st.Incidents(context.Background(), store.IncidentFilter{Kind: "reboot"})
+	if len(l) != 1 {
+		t.Fatalf("got %d reboot incidents, want only the real one", len(l))
+	}
+	hosts, _ := e2.st.Hosts(context.Background())
+	if hosts[0].LastBoot != wire.FormatBootID([16]byte{0xb}) {
+		t.Fatalf("newest boot is %s", hosts[0].LastBoot)
 	}
 }

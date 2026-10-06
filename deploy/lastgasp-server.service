@@ -1,0 +1,15 @@
+[Unit]
+Description=lastgasp log collection server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/lastgasp-server -listen :5140 -http :8080 -db /var/lib/lastgasp/lastgasp.db -key-file /etc/lastgasp/keys
+StateDirectory=lastgasp
+DynamicUser=yes
+# Reloads the key file and the rules file.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

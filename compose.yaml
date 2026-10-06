@@ -1,0 +1,50 @@
+# lastgasp-server with a PostgreSQL database.
+# Needs a ./keys file ("host hexkey" lines) and POSTGRES_PASSWORD in .env or the environment.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lastgasp
+      POSTGRES_DB: lastgasp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lastgasp -d lastgasp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build: .
+    image: lastgasp-server:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # pgx reads PGPASSWORD, so the password stays out of the command line.
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=postgres://lastgasp@db:5432/lastgasp?sslmode=disable
+      - -key-file=/etc/lastgasp/keys
+      - -retain=${LASTGASP_RETAIN:-720h}
+      # - -alert-webhook=https://hooks.slack.com/services/...
+      # - -alert-format=slack
+      # - -public-url=https://lastgasp.example.net
+      # Login for the UI and API, see README. Also uncomment the auth volume below.
+      # - -auth-file=/etc/lastgasp/auth
+    volumes:
+      - ./keys:/etc/lastgasp/keys:ro
+      # - ./auth:/etc/lastgasp/auth:ro
+    ports:
+      - "${LASTGASP_UDP_PORT:-5140}:5140/udp"
+      # The web UI and API have no login, so they only listen on localhost by default.
+      - "${LASTGASP_HTTP_BIND:-127.0.0.1}:${LASTGASP_HTTP_PORT:-8080}:8080"
+
+volumes:
+  pgdata:

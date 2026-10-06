@@ -1,0 +1,219 @@
+package wire
+
+import (
+	"bytes"
+	"errors"
+	"strings"
+	"testing"
+)
+
+var testKey = bytes.Repeat([]byte{7}, 32)
+
+func keyFor(string) []byte { return testKey }
+
+func samplePacket() *Packet {
+	return &Packet{
+		Host:     "node-1",
+		BootID:   [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		Instance: 42,
+		Seq:      7,
+		SentAt:   1700000000,
+		Kind:     KindKmsg,
+		Record:   Record{Priority: 3, Seq: 99, TsUsec: 123456, Part: 1, Parts: 1, Msg: "disk error"},
+	}
+}
+
+func TestRoundTripRecord(t *testing.T) {
+	p := samplePacket()
+	b, err := Encode(p, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(b, keyFor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != *p {
+		t.Fatalf("got %+v, want %+v", got, p)
+	}
+}
+
+func TestRoundTripHeartbeat(t *testing.T) {
+	p := samplePacket()
+	p.Kind = KindHeartbeat
+	p.Record = Record{}
+	p.Stats = Stats{KmsgRead: 1, KmsgOverruns: 2, KmsgInvalid: 3, BufferDrops: 4, SendErrors: 5, PstoreRecords: 6, UptimeSec: 7, Buffered: 8}
+	b, err := Encode(p, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(b, keyFor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != *p {
+		t.Fatalf("got %+v, want %+v", got, p)
+	}
+}
+
+func TestTamperedPacketRejected(t *testing.T) {
+	b, _ := Encode(samplePacket(), testKey)
+	for i := range b {
+		c := bytes.Clone(b)
+		c[i] ^= 0x01
+		if _, err := Decode(c, keyFor); err == nil {
+			t.Fatalf("flipping byte %d was not detected", i)
+		}
+	}
+}
+
+func TestWrongKeyAndUnknownHost(t *testing.T) {
+	b, _ := Encode(samplePacket(), testKey)
+	other := func(string) []byte { return bytes.Repeat([]byte{9}, 32) }
+	if _, err := Decode(b, other); !errors.Is(err, ErrAuth) {
+		t.Fatalf("want ErrAuth, got %v", err)
+	}
+	if _, err := Decode(b, func(string) []byte { return nil }); !errors.Is(err, ErrUnknownHost) {
+		t.Fatalf("want ErrUnknownHost, got %v", err)
+	}
+}
+
+func TestSealerNeverReusesNonce(t *testing.T) {
+	s, err := NewSealer(testKey, "node-1", [16]byte{1}, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		b, err := s.Seal(samplePacket())
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdr := string(b[:headerFixed+len("node-1")])
+		if seen[hdr] {
+			t.Fatalf("packet %d reuses a nonce", i)
+		}
+		seen[hdr] = true
+		if _, err := Decode(b, keyFor); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMessageIsEncrypted(t *testing.T) {
+	b, _ := Encode(samplePacket(), testKey)
+	if bytes.Contains(b, []byte("disk error")) {
+		t.Fatal("message found in clear text")
+	}
+	// Another agent run with the same key gets a different derived key.
+	p := samplePacket()
+	p.Instance = 43
+	b2, _ := Encode(p, testKey)
+	copy(b2[headerFixed+len(p.Host)-16:], b[headerFixed+len(p.Host)-16:headerFixed+len(p.Host)-8])
+	if _, err := Decode(b2, keyFor); !errors.Is(err, ErrAuth) {
+		t.Fatalf("instance swap: want ErrAuth, got %v", err)
+	}
+}
+
+func TestOldVersionRejected(t *testing.T) {
+	b, _ := Encode(samplePacket(), testKey)
+	b[4] = 1
+	if _, err := Decode(b, keyFor); !errors.Is(err, ErrVersion) {
+		t.Fatalf("want ErrVersion, got %v", err)
+	}
+}
+
+func TestTruncatedPacketRejected(t *testing.T) {
+	b, _ := Encode(samplePacket(), testKey)
+	for n := 0; n < len(b); n++ {
+		if _, err := Decode(b[:n], keyFor); err == nil {
+			t.Fatalf("truncated packet of %d bytes was accepted", n)
+		}
+	}
+}
+
+func TestMaxMsgFits(t *testing.T) {
+	p := samplePacket()
+	p.Host = strings.Repeat("h", MaxHostLen)
+	p.Record.Msg = strings.Repeat("x", MaxMsg(len(p.Host)))
+	b, err := Encode(p, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != MaxPacket {
+		t.Fatalf("packet size %d, want %d", len(b), MaxPacket)
+	}
+	p.Record.Msg += "x"
+	if _, err := Encode(p, testKey); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("want ErrTooLarge, got %v", err)
+	}
+}
+
+func TestSplitMessage(t *testing.T) {
+	msg := strings.Repeat("ab€", 100)
+	parts := SplitMessage(msg, 10)
+	if strings.Join(parts, "") != msg {
+		t.Fatal("parts do not join back into the message")
+	}
+	for _, p := range parts {
+		if len(p) > 10 || !strings.HasPrefix(msg[strings.Index(msg, p):], p) {
+			t.Fatalf("bad part %q", p)
+		}
+		if strings.ContainsRune(p, '�') {
+			t.Fatalf("part %q cuts a character", p)
+		}
+	}
+	if got := SplitMessage("short", 10); len(got) != 1 {
+		t.Fatalf("short message split into %d parts", len(got))
+	}
+}
+
+func TestBootID(t *testing.T) {
+	s := "0f8fad5b-d9cb-469f-a165-70867728950e"
+	id, err := ParseBootID(s + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if FormatBootID(id) != s {
+		t.Fatalf("got %s", FormatBootID(id))
+	}
+	if _, err := ParseBootID("nope"); err == nil {
+		t.Fatal("invalid boot id accepted")
+	}
+}
+
+func TestParseKey(t *testing.T) {
+	if _, err := ParseKey(strings.Repeat("ab", 16)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseKey("abcd"); err == nil {
+		t.Fatal("short key accepted")
+	}
+	if _, err := ParseKey("zz"); err == nil {
+		t.Fatal("non hex key accepted")
+	}
+}
+
+func TestHostValidation(t *testing.T) {
+	for _, h := range []string{"db-01", "node_1.example.net", "srv-é"} {
+		if !ValidHost(h) {
+			t.Errorf("%q rejected", h)
+		}
+	}
+	for _, h := range []string{"", "a b", "a\nb", "bad\xff", strings.Repeat("h", MaxHostLen+1)} {
+		if ValidHost(h) {
+			t.Errorf("%q accepted", h)
+		}
+		p := samplePacket()
+		p.Host = h
+		if _, err := Encode(p, testKey); err == nil {
+			t.Errorf("encode with host %q accepted", h)
+		}
+	}
+	// A packet with a bad host is rejected before any key lookup.
+	b, _ := Encode(samplePacket(), testKey)
+	b[6] = 0xff
+	if _, err := Decode(b, func(string) []byte { t.Fatal("key looked up"); return nil }); !errors.Is(err, ErrHost) {
+		t.Fatalf("want ErrHost, got %v", err)
+	}
+}

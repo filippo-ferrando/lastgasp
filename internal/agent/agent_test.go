@@ -136,22 +136,107 @@ func TestQueueDropsOldest(t *testing.T) {
 	if !q.Push(Item{Rec: wire.Record{Seq: 3}}) {
 		t.Fatal("full queue did not report a drop")
 	}
-	it, _ := q.Peek()
+	it, _ := q.Next()
 	if it.Rec.Seq != 2 {
 		t.Fatalf("oldest left should be 2, got %d", it.Rec.Seq)
 	}
-	// The peeked item gets dropped by a push; Done must not remove the wrong one.
+	// The item from Next gets dropped by a push; Sent must not mark the wrong one.
 	q.Push(Item{Rec: wire.Record{Seq: 4}})
-	q.Done(it)
+	q.Sent(it, 1, 1, false)
 	if q.Len() != 2 {
 		t.Fatalf("len %d, want 2", q.Len())
 	}
-	it, _ = q.Peek()
-	q.Done(it)
-	it, _ = q.Peek()
-	q.Done(it)
-	if _, ok := q.Peek(); ok || it.Rec.Seq != 4 {
-		t.Fatal("queue should be empty after removing 3 and 4")
+	for seq := uint64(2); seq <= 3; seq++ {
+		it, _ = q.Next()
+		q.Sent(it, seq, seq, false)
+	}
+	if _, ok := q.Next(); ok || it.Rec.Seq != 4 || q.Len() != 0 {
+		t.Fatal("queue should be empty after sending 3 and 4")
+	}
+}
+
+// sendAll sends every item of q as packets with seq first, first+1, ..., one transmission each.
+func sendAll(q *Queue, first uint64) {
+	for seq := first; ; seq++ {
+		it, ok := q.Next()
+		if !ok {
+			return
+		}
+		q.Sent(it, seq, seq, true)
+	}
+}
+
+func TestQueueKeepsSentItemsUntilAck(t *testing.T) {
+	q := NewQueue(10)
+	for i := 1; i <= 5; i++ {
+		q.Push(Item{Rec: wire.Record{Seq: uint64(i)}})
+	}
+	sendAll(q, 1)
+	if q.Len() != 5 || q.Unconfirmed() != 5 || q.Oldest() != 1 {
+		t.Fatalf("len %d unconfirmed %d oldest %d", q.Len(), q.Unconfirmed(), q.Oldest())
+	}
+	// The server got 1 to 4 except 2. 5 may still be on its way.
+	q.Ack(4, []wire.Range{{From: 2, To: 2}}, 6)
+	if q.Len() != 2 || q.Oldest() != 2 {
+		t.Fatalf("len %d oldest %d", q.Len(), q.Oldest())
+	}
+	it, ok := q.Next()
+	if !ok || it.seq != 2 {
+		t.Fatalf("next %+v, want a resend of seq 2", it)
+	}
+	q.Sent(it, 0, 7, true)
+	if _, ok := q.Next(); ok {
+		t.Fatal("seq 2 sent again twice")
+	}
+	// An ack for a heartbeat older than the resend does not trigger another one.
+	q.Ack(4, []wire.Range{{From: 2, To: 2}}, 6)
+	if _, ok := q.Next(); ok {
+		t.Fatal("resent for an old ack")
+	}
+	q.Ack(5, nil, 8)
+	if q.Len() != 0 || q.Oldest() != 0 {
+		t.Fatalf("len %d oldest %d after the full ack", q.Len(), q.Oldest())
+	}
+}
+
+func TestQueueDropsSentItemsFirstWhenFull(t *testing.T) {
+	q := NewQueue(3)
+	for i := 1; i <= 3; i++ {
+		q.Push(Item{Rec: wire.Record{Seq: uint64(i)}})
+	}
+	sendAll(q, 10)
+	// A sent item most likely arrived, so dropping it is not counted.
+	if q.Push(Item{Rec: wire.Record{Seq: 4}}) {
+		t.Fatal("sent item counted as dropped")
+	}
+	if q.Oldest() != 11 || q.Len() != 3 {
+		t.Fatalf("oldest %d len %d", q.Oldest(), q.Len())
+	}
+	// A seq listed as missing after its item was dropped is skipped.
+	q.Ack(12, []wire.Range{{From: 10, To: 10}}, 100)
+	if it, ok := q.Next(); !ok || it.seq != 0 || it.Rec.Seq != 4 {
+		t.Fatalf("next %+v", it)
+	}
+	if q.Len() != 1 {
+		t.Fatalf("len %d", q.Len())
+	}
+}
+
+func TestQueueDrop(t *testing.T) {
+	q := NewQueue(4)
+	for i := 1; i <= 3; i++ {
+		q.Push(Item{Rec: wire.Record{Seq: uint64(i)}})
+	}
+	it, _ := q.Next()
+	q.Sent(it, 5, 1, true)
+	it, _ = q.Next()
+	q.Drop(it)
+	it, _ = q.Next()
+	q.Sent(it, 6, 2, true)
+	// Seq order holds after a drop, so an ack still finds every item.
+	q.Ack(6, []wire.Range{{From: 6, To: 6}}, 3)
+	if it, ok := q.Next(); !ok || it.seq != 6 || q.Len() != 1 {
+		t.Fatalf("next %+v len %d", it, q.Len())
 	}
 }
 
@@ -416,7 +501,7 @@ func TestSenderHoldsRecordsUntilAck(t *testing.T) {
 	old := *probe
 	old.SentAt = 12345
 	for _, p := range []*wire.Packet{&other, &old} {
-		bad, _ := wire.EncodeAck(p, testKey)
+		bad, _ := wire.EncodeAck(p, 0, nil, testKey)
 		conn.acks <- bad
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -424,26 +509,128 @@ func TestSenderHoldsRecordsUntilAck(t *testing.T) {
 		t.Fatal("records sent after a bad ack")
 	}
 
-	ack, _ := wire.EncodeAck(probe, testKey)
+	ack, _ := wire.EncodeAck(probe, 0, nil, testKey)
 	conn.acks <- ack
-	for q.Len() > 0 && ctx.Err() == nil {
-		time.Sleep(5 * time.Millisecond)
-	}
-	cancel()
 	var msgs []string
 	var seqs []uint64
-	for _, p := range conn.packets(t) {
-		if p.Seq == 0 {
-			continue
-		}
-		seqs = append(seqs, p.Seq)
-		if p.Kind == wire.KindKmsg {
-			msgs = append(msgs, p.Record.Msg)
+	var beat *wire.Packet
+	for ctx.Err() == nil && (len(msgs) < 2 || beat == nil) {
+		time.Sleep(5 * time.Millisecond)
+		msgs, seqs, beat = nil, nil, nil
+		for _, p := range conn.packets(t) {
+			if p.Seq == 0 {
+				continue
+			}
+			seqs = append(seqs, p.Seq)
+			if p.Kind == wire.KindKmsg {
+				msgs = append(msgs, p.Record.Msg)
+			} else if len(msgs) == 2 {
+				beat = p
+			}
 		}
 	}
 	if strings.Join(msgs, ",") != "a,b" || seqs[0] != 1 {
 		t.Fatalf("sent %v with seqs %v", msgs, seqs)
 	}
+	// Sent records stay until a server confirms them.
+	if q.Len() != 2 || beat.Oldest != 1 {
+		t.Fatalf("queue has %d records, heartbeat oldest %d", q.Len(), beat.Oldest)
+	}
+	ack, _ = wire.EncodeAck(beat, beat.Seq, nil, testKey)
+	conn.acks <- ack
+	for q.Len() > 0 && ctx.Err() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if q.Len() != 0 {
+		t.Fatal("records not released by the ack")
+	}
+}
+
+func TestSenderResendsMissingRecords(t *testing.T) {
+	conn := &flakyConn{acks: make(chan []byte, 1)}
+	q := NewQueue(10)
+	for _, m := range []string{"a", "b", "c"} {
+		q.Push(Item{Kind: wire.KindKmsg, Rec: wire.Record{Msg: m}})
+	}
+	s := &Sender{Host: "h", Instance: 7, Key: testKey, Queue: q, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}, Heartbeat: 30 * time.Millisecond, WaitAck: true}
+	s.newConn = func() (packetConn, error) { return conn, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	// waitFor returns the first packet after skip packets that matches ok.
+	waitFor := func(skip int, ok func(*wire.Packet) bool) (*wire.Packet, int) {
+		for ctx.Err() == nil {
+			ps := conn.packets(t)
+			for i := skip; i < len(ps); i++ {
+				if ok(ps[i]) {
+					return ps[i], i + 1
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("timeout")
+		return nil, 0
+	}
+	probe, _ := waitFor(0, func(p *wire.Packet) bool { return p.Kind == wire.KindHeartbeat })
+	ack, _ := wire.EncodeAck(probe, 0, nil, testKey)
+	conn.acks <- ack
+	_, n := waitFor(0, func(p *wire.Packet) bool { return p.Record.Msg == "c" })
+	beat, n := waitFor(n, func(p *wire.Packet) bool { return p.Kind == wire.KindHeartbeat && p.Seq != 0 })
+
+	// The server lost the packet of "b" and tells so.
+	var bSeq uint64
+	for _, p := range conn.packets(t) {
+		if p.Record.Msg == "b" {
+			bSeq = p.Seq
+		}
+	}
+	ack, _ = wire.EncodeAck(beat, beat.Seq, []wire.Range{{From: bSeq, To: bSeq}}, testKey)
+	conn.acks <- ack
+	again, _ := waitFor(n, func(p *wire.Packet) bool { return p.Kind == wire.KindKmsg })
+	if again.Record.Msg != "b" || again.Seq != bSeq {
+		t.Fatalf("sent again %q with seq %d, want b with seq %d", again.Record.Msg, again.Seq, bSeq)
+	}
+	for q.Len() != 1 && ctx.Err() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Until "b" is confirmed the next heartbeat says it can still come.
+	beat, _ = waitFor(n, func(p *wire.Packet) bool { return p.Kind == wire.KindHeartbeat && p.Seq > beat.Seq })
+	if beat.Oldest != bSeq {
+		t.Fatalf("heartbeat oldest %d, want %d", beat.Oldest, bSeq)
+	}
+}
+
+func TestSenderSendsEarlyHeartbeatWhenBufferWaits(t *testing.T) {
+	conn := &flakyConn{acks: make(chan []byte, 1)}
+	q := NewQueue(4)
+	for _, m := range []string{"a", "b"} {
+		q.Push(Item{Kind: wire.KindKmsg, Rec: wire.Record{Msg: m}})
+	}
+	s := &Sender{Host: "h", Key: testKey, Queue: q, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}, Heartbeat: time.Hour, WaitAck: true}
+	s.newConn = func() (packetConn, error) { return conn, nil }
+	// Pretend a server answered a moment ago.
+	s.init()
+	s.lastAck.Store(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+	for ctx.Err() == nil {
+		beats := 0
+		for _, p := range conn.packets(t) {
+			if p.Kind == wire.KindHeartbeat {
+				beats++
+			}
+		}
+		// One at start, one more because half the buffer waits for a server.
+		if beats >= 2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no early heartbeat")
 }
 
 // nonceCounter reads the clear nonce counter of a sealed packet.

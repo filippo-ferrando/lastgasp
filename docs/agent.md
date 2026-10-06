@@ -72,7 +72,7 @@ LASTGASP_KEY=4f1c...e9 lastgasp-agent -server 10.0.0.5:5140,10.0.0.6:5140 -hostn
 | `-key-file` | | file with the hex key. `LASTGASP_KEY` is used when not set |
 | `-hostname` | kernel hostname | name sent to the server: UTF-8, no spaces or control characters, at most 255 bytes |
 | `-dns` | | DNS server `ip:port`, skips `/etc/resolv.conf` |
-| `-buffer` | 16384 | records kept in memory, 1 to 1048576. pstore lines have their own queue on top |
+| `-buffer` | 16384 | records kept in memory until a server confirms them, 1 to 1048576. pstore lines have their own queue on top |
 | `-rate` | 2000 | max packets per second, 0 for no limit |
 | `-heartbeat` | 5s | heartbeat interval, 0 or at least 100ms |
 | `-wait-ack` | true | hold records until a server answers a heartbeat. Needs `-heartbeat` above 0 |
@@ -98,9 +98,9 @@ Bad values stop the agent at start with a clear message, instead of failing late
 
 | Setting | Effect |
 | --- | --- |
-| `-buffer` | each slot holds one record of up to about 1.3 KB. 16384 slots cover a full default kernel buffer several times. Raise it for machines with a large `log_buf_len` or long server outages |
+| `-buffer` | each slot holds one record of up to about 1.3 KB, from when it is read until a server confirms it. 16384 slots cover a full default kernel buffer several times. Raise it for machines with a large `log_buf_len` or long server outages. Lost records can be sent again only while they are still in the buffer |
 | `-rate` | the boot replay and error floods are paced to this rate. 2000 packets per second is about 2.6 MB/s. Lower it on slow links |
-| `-heartbeat` | shorter means faster loss detection and a faster switch to holding when the server dies, at the cost of more packets |
+| `-heartbeat` | shorter means faster loss detection, lost records sent again sooner, and a faster switch to holding when the server dies, at the cost of more packets |
 | `-memory-limit` | the agent normally uses a few MB. The limit only matters with a very large `-buffer` |
 
 ## Where the agent logs

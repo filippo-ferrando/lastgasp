@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	magic   = "LGP1"
-	version = 2
+	magic = "LGP1"
+	// Version 3 adds the oldest held seq to heartbeats and the receive state to acks.
+	version = 3
+	// minVersion is the oldest version still accepted, so agents can be upgraded after the server.
+	minVersion = 2
 
 	// TagSize is the size of the AES-GCM authentication tag at the end of a packet.
 	TagSize = 16
@@ -33,6 +36,9 @@ const (
 	innerFixed  = 1 + 8 + 8
 	recordFixed = 2 + 8 + 8 + 8 + 1 + 1 + 2
 	statsSize   = 7*8 + 4
+
+	// MaxAckRanges bounds the missing ranges in one ack, so it always fits one packet.
+	MaxAckRanges = 32
 )
 
 // Kind tells what a packet carries.
@@ -72,6 +78,7 @@ var (
 
 // Packet is one datagram. Seq starts at 1 and grows by one per packet sent by an agent instance.
 type Packet struct {
+	Version  uint8 // set by Decode and Seal; Encode writes version 2 only when asked
 	Host     string
 	BootID   [16]byte
 	Instance uint64
@@ -80,6 +87,21 @@ type Packet struct {
 	Kind     Kind
 	Record   Record // for KindKmsg and KindPstore
 	Stats    Stats  // for KindHeartbeat
+	// Oldest is the lowest seq the agent can still send again, for KindHeartbeat since version 3.
+	// Packets below it that never arrived are lost for good.
+	Oldest uint64
+}
+
+// Range is an inclusive range of packet sequence numbers.
+type Range struct{ From, To uint64 }
+
+// Ack answers a heartbeat. Since version 3 it also tells which packets the server has.
+type Ack struct {
+	Seq    uint64 // seq of the heartbeat it answers
+	SentAt int64  // SentAt of that heartbeat
+	// Every packet up to Upto arrived, except the ranges in Missing. Upto 0 tells nothing.
+	Upto    uint64
+	Missing []Range
 }
 
 // Record is one log line, or one part of a line too long for a single packet.
@@ -180,7 +202,10 @@ func NewSealer(key []byte, host string, bootID [16]byte, instance uint64) (*Seal
 // Seal encodes and encrypts p. Host, BootID and Instance are taken from the sealer.
 func (s *Sealer) Seal(p *Packet) ([]byte, error) {
 	p.Host, p.BootID, p.Instance = s.host, s.bootID, s.instance
-	inner, err := encodeInner(p)
+	if p.Version != minVersion {
+		p.Version = version
+	}
+	inner, err := encodeInner(p, p.Version)
 	if err != nil {
 		return nil, err
 	}
@@ -188,15 +213,15 @@ func (s *Sealer) Seal(p *Packet) ([]byte, error) {
 		return nil, ErrTooLarge
 	}
 	ctr := s.counter.Add(1)
-	b := header(s.host, s.bootID, s.instance, ctr)
+	b := header(p.Version, s.host, s.bootID, s.instance, ctr)
 	// The clear header is authenticated as additional data.
 	return s.aead.Seal(b, nonce(ctr), inner, b), nil
 }
 
-func header(host string, bootID [16]byte, instance, ctr uint64) []byte {
+func header(ver uint8, host string, bootID [16]byte, instance, ctr uint64) []byte {
 	b := make([]byte, 0, MaxPacket)
 	b = append(b, magic...)
-	b = append(b, version, byte(len(host)))
+	b = append(b, ver, byte(len(host)))
 	b = append(b, host...)
 	b = append(b, bootID[:]...)
 	b = binary.BigEndian.AppendUint64(b, instance)
@@ -204,7 +229,11 @@ func header(host string, bootID [16]byte, instance, ctr uint64) []byte {
 }
 
 // EncodeAck builds the server answer to the heartbeat p, sealed with the key of p's host.
-func EncodeAck(p *Packet, key []byte) ([]byte, error) {
+// upto and missing tell what the server received. A version 2 heartbeat gets a version 2 ack without them.
+func EncodeAck(p *Packet, upto uint64, missing []Range, key []byte) ([]byte, error) {
+	if len(missing) > MaxAckRanges {
+		return nil, ErrTooLarge
+	}
 	a, err := ackAEAD(key, p.BootID, p.Instance)
 	if err != nil {
 		return nil, err
@@ -212,38 +241,67 @@ func EncodeAck(p *Packet, key []byte) ([]byte, error) {
 	var r [8]byte
 	rand.Read(r[:])
 	ctr := binary.BigEndian.Uint64(r[:])
-	inner, err := encodeInner(&Packet{Kind: KindAck, Seq: p.Seq, SentAt: p.SentAt})
-	if err != nil {
-		return nil, err
+	ver := uint8(version)
+	if p.Version == minVersion {
+		ver = minVersion
 	}
-	b := header(p.Host, p.BootID, p.Instance, ctr)
-	return a.Seal(b, nonce(ctr), inner, b), nil
+	b := make([]byte, 0, MaxPacket)
+	b = append(b, byte(KindAck))
+	b = binary.BigEndian.AppendUint64(b, p.Seq)
+	b = binary.BigEndian.AppendUint64(b, uint64(p.SentAt))
+	if ver >= 3 {
+		b = binary.BigEndian.AppendUint64(b, upto)
+		b = append(b, byte(len(missing)))
+		for _, m := range missing {
+			b = binary.BigEndian.AppendUint64(b, m.From)
+			b = binary.BigEndian.AppendUint64(b, m.To)
+		}
+	}
+	h := header(ver, p.Host, p.BootID, p.Instance, ctr)
+	return a.Seal(h, nonce(ctr), b, h), nil
 }
 
-// DecodeAck checks an ack sent to the agent run (host, bootID, instance). It returns the seq and the
+// DecodeAck checks an ack sent to the agent run (host, bootID, instance). The returned ack holds the seq and
 // SentAt of the heartbeat it answers, so the agent can refuse answers to old heartbeats.
-func DecodeAck(buf, key []byte, host string, bootID [16]byte, instance uint64) (seq uint64, sentAt int64, err error) {
+func DecodeAck(buf, key []byte, host string, bootID [16]byte, instance uint64) (Ack, error) {
+	var ack Ack
 	h, err := parseHeader(buf)
 	if err != nil {
-		return 0, 0, err
+		return ack, err
 	}
 	if h.host != host || h.bootID != bootID || h.instance != instance {
-		return 0, 0, ErrAuth
+		return ack, ErrAuth
 	}
 	a, err := ackAEAD(key, bootID, instance)
 	if err != nil {
-		return 0, 0, err
+		return ack, err
 	}
 	inner, err := a.Open(nil, nonce(h.ctr), buf[h.len:], buf[:h.len])
 	if err != nil {
-		return 0, 0, ErrAuth
+		return ack, ErrAuth
 	}
 	r := reader{b: inner}
-	kind, seq, sentAt := Kind(r.u8()), r.u64(), int64(r.u64())
-	if r.bad || len(r.b) != 0 || kind != KindAck {
-		return 0, 0, ErrMalformed
+	kind := Kind(r.u8())
+	ack.Seq, ack.SentAt = r.u64(), int64(r.u64())
+	if h.version >= 3 {
+		ack.Upto = r.u64()
+		n := int(r.u8())
+		if n > MaxAckRanges {
+			return Ack{}, ErrMalformed
+		}
+		for i := 0; i < n && !r.bad; i++ {
+			m := Range{From: r.u64(), To: r.u64()}
+			// Ranges must be in order and below Upto, so the agent can trust them blindly.
+			if m.From > m.To || m.To > ack.Upto || (i > 0 && m.From <= ack.Missing[i-1].To) {
+				return Ack{}, ErrMalformed
+			}
+			ack.Missing = append(ack.Missing, m)
+		}
 	}
-	return seq, sentAt, nil
+	if r.bad || len(r.b) != 0 || kind != KindAck {
+		return Ack{}, ErrMalformed
+	}
+	return ack, nil
 }
 
 // Encode encrypts a single packet with a random nonce counter. Agents use a Sealer instead.
@@ -258,7 +316,7 @@ func Encode(p *Packet, key []byte) ([]byte, error) {
 	return s.Seal(p)
 }
 
-func encodeInner(p *Packet) ([]byte, error) {
+func encodeInner(p *Packet, ver uint8) ([]byte, error) {
 	b := make([]byte, 0, MaxPacket)
 	b = append(b, byte(p.Kind))
 	b = binary.BigEndian.AppendUint64(b, p.Seq)
@@ -276,13 +334,15 @@ func encodeInner(p *Packet) ([]byte, error) {
 		b = append(b, r.Part, r.Parts)
 		b = binary.BigEndian.AppendUint16(b, uint16(len(r.Msg)))
 		b = append(b, r.Msg...)
-	case KindAck:
 	case KindHeartbeat:
 		s := &p.Stats
 		for _, v := range []uint64{s.KmsgRead, s.KmsgOverruns, s.KmsgInvalid, s.BufferDrops, s.SendErrors, s.PstoreRecords, s.UptimeSec} {
 			b = binary.BigEndian.AppendUint64(b, v)
 		}
 		b = binary.BigEndian.AppendUint32(b, s.Buffered)
+		if ver >= 3 {
+			b = binary.BigEndian.AppendUint64(b, p.Oldest)
+		}
 	default:
 		return nil, ErrKind
 	}
@@ -290,6 +350,7 @@ func encodeInner(p *Packet) ([]byte, error) {
 }
 
 type clearHeader struct {
+	version  uint8
 	host     string
 	bootID   [16]byte
 	instance uint64
@@ -302,9 +363,10 @@ func parseHeader(buf []byte) (clearHeader, error) {
 	if len(buf) < 6 || string(buf[:4]) != magic {
 		return h, ErrMalformed
 	}
-	if buf[4] != version {
+	if buf[4] < minVersion || buf[4] > version {
 		return h, ErrVersion
 	}
+	h.version = buf[4]
 	hostLen := int(buf[5])
 	h.len = headerFixed + hostLen
 	if hostLen == 0 || len(buf) < h.len+innerFixed+TagSize {
@@ -331,7 +393,7 @@ func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
 	if key == nil {
 		return nil, ErrUnknownHost
 	}
-	p := &Packet{Host: h.host, BootID: h.bootID, Instance: h.instance}
+	p := &Packet{Version: h.version, Host: h.host, BootID: h.bootID, Instance: h.instance}
 	a, err := runAEAD(key, p.BootID, p.Instance)
 	if err != nil {
 		return nil, err
@@ -361,6 +423,9 @@ func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
 			*v = r.u64()
 		}
 		s.Buffered = r.u32()
+		if p.Version >= 3 {
+			p.Oldest = r.u64()
+		}
 	default:
 		return nil, ErrKind
 	}

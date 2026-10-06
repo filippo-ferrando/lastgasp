@@ -21,6 +21,8 @@ services:
     build: .
     image: lastgasp-server:latest
     restart: unless-stopped
+    # Time to store queued packets and save state on stop.
+    stop_grace_period: 30s
     depends_on:
       db:
         condition: service_healthy

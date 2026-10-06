@@ -85,6 +85,8 @@ type KmsgReader struct {
 	Stats   *Stats
 	Log     *Logger
 	open    func(string) (recordSource, error)
+	lastSeq uint64 // a reopened device starts at the oldest record, so records up to here are skipped
+	started bool
 }
 
 // Run blocks until ctx is done. A blocked read only returns when the kernel logs something new.
@@ -103,8 +105,10 @@ func (k *KmsgReader) Run(ctx context.Context) {
 			backoff.Sleep(ctx)
 			continue
 		}
-		k.readLoop(ctx, src, buf, backoff)
-		src.Close()
+		func() {
+			defer src.Close()
+			k.readLoop(ctx, src, buf, backoff)
+		}()
 	}
 }
 
@@ -119,6 +123,10 @@ func (k *KmsgReader) readLoop(ctx context.Context, src recordSource, buf []byte,
 				k.Stats.KmsgInvalid.Add(1)
 				continue
 			}
+			if k.started && e.Seq <= k.lastSeq {
+				continue
+			}
+			k.started, k.lastSeq = true, e.Seq
 			k.Stats.KmsgRead.Add(1)
 			k.OnEntry(e)
 		case errors.Is(err, syscall.EPIPE):

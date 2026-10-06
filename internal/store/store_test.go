@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -87,6 +88,7 @@ func TestQueryFilters(t *testing.T) {
 			check(Filter{MaxLevel: -1, Host: "h2"}, 1)
 			check(Filter{MaxLevel: -1, Source: "pstore"}, 1)
 			check(Filter{MaxLevel: -1, Text: "failure"}, 1)
+			check(Filter{MaxLevel: -1, Text: "FAILURE"}, 1)
 			check(Filter{MaxLevel: -1, Limit: 2}, 2)
 			check(Filter{MaxLevel: -1, Text: "%"}, 0)
 			check(Filter{MaxLevel: -1, Text: "_"}, 0)
@@ -352,5 +354,26 @@ func TestDeleteOldRecordsAndBoots(t *testing.T) {
 				t.Fatalf("hosts %+v", hosts)
 			}
 		})
+	}
+}
+
+func TestOpenRejectsURIPath(t *testing.T) {
+	if _, err := Open(filepath.Join(t.TempDir(), "a?b.db")); err == nil {
+		t.Fatal("path with ? accepted")
+	}
+}
+
+func TestOpenIncidentsIsNotPaged(t *testing.T) {
+	s := openStores(t)["sqlite"]
+	ctx := context.Background()
+	for i := 0; i < 1200; i++ {
+		inc := &Incident{Host: "h", BootID: "b", Kind: "kernel_error", Rule: strconv.Itoa(i), OpenedAt: time.Now(), UpdatedAt: time.Now()}
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, err := s.OpenIncidents(ctx)
+	if err != nil || len(l) != 1200 {
+		t.Fatalf("got %d, err %v", len(l), err)
 	}
 }

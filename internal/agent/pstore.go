@@ -22,8 +22,11 @@ type PstoreLine struct {
 // defaultPriority is used for lines without a "<N>" prefix (kern.info).
 const defaultPriority = 6
 
-// pstoreFile reports whether a pstore file holds text log lines.
+// pstoreFile reports whether a pstore file holds text log lines. Compressed EFI records (.enc.z) are binary.
 func pstoreFile(name string) bool {
+	if strings.HasSuffix(name, ".enc.z") {
+		return false
+	}
 	for _, p := range []string{"dmesg-", "console-", "pmsg-"} {
 		if strings.HasPrefix(name, p) {
 			return true

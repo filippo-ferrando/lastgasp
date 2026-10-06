@@ -1,6 +1,7 @@
 package incident
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"io"
@@ -238,6 +239,7 @@ func TestLoadRestoresOpenIncidents(t *testing.T) {
 type hook struct {
 	mu     sync.Mutex
 	fails  int
+	status int // answer for failures, 503 when 0
 	bodies []string
 	sigs   []string
 }
@@ -247,7 +249,7 @@ func (h *hook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer h.mu.Unlock()
 	if h.fails > 0 {
 		h.fails--
-		http.Error(w, "busy", http.StatusServiceUnavailable)
+		http.Error(w, "busy", cmp.Or(h.status, http.StatusServiceUnavailable))
 		return
 	}
 	b, _ := io.ReadAll(r.Body)
@@ -267,15 +269,16 @@ func TestNotifier(t *testing.T) {
 	n.init()
 
 	e.add(t, "h", "b1", "kmsg", e.t0, "Kernel panic - not syncing: x", "Out of memory: Killed process 1", "EXT4-fs error (device sda1)")
-	e.add(t, "h", "b1", "kmsg", e.t0, "BUG: soft") // second critical kernel error, rate limited
+	e.add(t, "h", "b1", "kmsg", e.t0, "BUG: soft")                     // another rule, so not held back by the panic alert
+	e.add(t, "h", "b2", "kmsg", e.t0, "Kernel panic - not syncing: y") // same rule again, rate limited
 	if err := n.flush(ctx); err == nil {
 		t.Fatal("first call should fail")
 	}
 	if err := n.flush(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.bodies) != 1 {
-		t.Fatalf("sent %d alerts, want 1", len(h.bodies))
+	if len(h.bodies) != 4 {
+		t.Fatalf("sent %d alerts, want 4", len(h.bodies))
 	}
 	var p Payload
 	if err := json.Unmarshal([]byte(h.bodies[0]), &p); err != nil {
@@ -290,10 +293,48 @@ func TestNotifier(t *testing.T) {
 	l, _ := e.st.Incidents(ctx, store.IncidentFilter{})
 	states := map[string]string{}
 	for _, i := range l {
-		states[i.Rule] = alertOf(i, "hook")
+		states[i.BootID+" "+i.Rule] = alertOf(i, "hook")
 	}
-	if states["panic"] != store.AlertSent || states["bug"] != store.AlertSuppressed || states["oom"] != store.AlertSuppressed {
+	if states["b1 panic"] != store.AlertSent || states["b1 bug"] != store.AlertSent || states["b1 oom"] != store.AlertSent ||
+		states["b2 panic"] != store.AlertSuppressed {
 		t.Fatalf("alert states %v", states)
+	}
+}
+
+func TestNotifierGivesUpSoOneAlertCannotBlockOthers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		fails  int
+		calls  int
+	}{
+		{"permanent error", http.StatusBadRequest, 1, 1},
+		{"retries used up", http.StatusServiceUnavailable, maxTries, maxTries},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			h := &hook{fails: tc.fails, status: tc.status}
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+			n := &Notifier{Store: e.st, Name: "hook", URL: srv.URL, MinSeverity: store.SeverityWarning, Metrics: e.d.Metrics, Log: e.d.Log}
+			n.init()
+			e.add(t, "h", "b1", "kmsg", e.t0, "Kernel panic - not syncing: x")
+			e.add(t, "h", "b1", "kmsg", e.t0, "BUG: soft")
+			var err error
+			for i := 0; i < tc.calls; i++ {
+				err = n.flush(context.Background())
+			}
+			if err != nil || len(h.bodies) != 1 {
+				t.Fatalf("err %v, sent %d", err, len(h.bodies))
+			}
+			l, _ := e.st.Incidents(context.Background(), store.IncidentFilter{})
+			for _, i := range l {
+				want := map[string]string{"panic": store.AlertFailed, "bug": store.AlertSent}[i.Rule]
+				if got := alertOf(i, "hook"); got != want {
+					t.Fatalf("%s: %s, want %s", i.Rule, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -514,4 +555,26 @@ func newHook(t *testing.T, h *hook) string {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+func TestCrashCheckWaitsForDatabase(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.add(t, "h", "b1", "kmsg", e.t0, "Kernel panic - not syncing: x")
+	e.d.NewBoot(ctx, "h", "b2", "b1", e.t0.Add(time.Minute))
+	// A failing query must not turn the crash into a clean reboot.
+	broken, cancel := context.WithCancel(ctx)
+	cancel()
+	e.d.Tick(broken, e.t0.Add(3*time.Minute))
+	if e.d.open[openKey("h", "b1", KindReboot, "")] == nil {
+		t.Fatal("reboot closed although the crash check failed")
+	}
+	e.d.Tick(ctx, e.t0.Add(4*time.Minute))
+	var crash bool
+	for _, i := range withoutSilent(e.incidents(t)) {
+		crash = crash || i.Kind == KindCrash
+	}
+	if !crash {
+		t.Fatal("crash not found after the database came back")
+	}
 }

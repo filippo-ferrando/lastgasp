@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,14 +39,25 @@ type Sender struct {
 	seq     uint64
 	start   time.Time
 	pace    pacer
-	lastAck atomic.Int64 // unix nanoseconds of the newest valid ack
+	lastAck atomic.Int64 // time since start of the newest valid ack, monotonic so clock steps at boot do not matter
 	acked   chan struct{}
 	state   string // "", "holding" or "sending", to log only changes
+
+	beatMu sync.Mutex
+	beats  [16]int64 // SentAt of the newest heartbeats, an ack must answer one of them
+	nbeat  int
 }
+
+// ackWindow is how long the agent keeps sending after the newest ack, in heartbeats.
+const ackWindow = 3
 
 var errNoAddr = errors.New("no server address known yet")
 
 func (s *Sender) init() error {
+	// After a panic Run starts again. The sealer is kept, as a new one would use the same nonces again.
+	if s.sealer != nil {
+		return nil
+	}
 	sealer, err := wire.NewSealer(s.Key, s.Host, s.BootID, s.Instance)
 	if err != nil {
 		return err
@@ -70,7 +82,7 @@ func (s *Sender) ready() bool {
 		return true
 	}
 	last := s.lastAck.Load()
-	return last != 0 && time.Since(time.Unix(0, last)) < 3*s.Heartbeat
+	return last != 0 && time.Since(s.start)-time.Duration(last) < ackWindow*s.Heartbeat
 }
 
 func (s *Sender) logState(ready bool) {
@@ -85,9 +97,28 @@ func (s *Sender) logState(ready bool) {
 		s.Log.Printf("send: waiting for a server to answer before sending records")
 		s.state = "holding"
 	case !ready && s.state == "sending":
-		s.Log.Printf("send: no answer from any server for %s, holding records", 3*s.Heartbeat)
+		s.Log.Printf("send: no answer from any server for %s, holding records", ackWindow*s.Heartbeat)
 		s.state = "holding"
 	}
+}
+
+func (s *Sender) noteBeat(sentAt int64) {
+	s.beatMu.Lock()
+	s.beats[s.nbeat%len(s.beats)] = sentAt
+	s.nbeat++
+	s.beatMu.Unlock()
+}
+
+// recentBeat reports whether sentAt belongs to one of the newest heartbeats, so a replayed old ack is refused.
+func (s *Sender) recentBeat(sentAt int64) bool {
+	s.beatMu.Lock()
+	defer s.beatMu.Unlock()
+	for _, b := range s.beats {
+		if b != 0 && b == sentAt {
+			return true
+		}
+	}
+	return false
 }
 
 // readAcks reads server answers until c is closed.
@@ -102,10 +133,11 @@ func (s *Sender) readAcks(c packetConn) {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		if _, err := wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance); err != nil {
+		_, sentAt, err := wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance)
+		if err != nil || !s.recentBeat(sentAt) {
 			continue
 		}
-		s.lastAck.Store(time.Now().UnixNano())
+		s.lastAck.Store(int64(time.Since(s.start)) + 1)
 		select {
 		case s.acked <- struct{}{}:
 		default:
@@ -113,7 +145,8 @@ func (s *Sender) readAcks(c packetConn) {
 	}
 }
 
-// Run sends until ctx is done. A record leaves the queue only after at least one server accepted it.
+// Run sends until ctx is done, then tries to send what is left for drainTime. A record leaves the
+// queue once the socket took it for at least one server. UDP gives no delivery receipt, acks only tell that a server listens.
 func (s *Sender) Run(ctx context.Context) {
 	if err := s.init(); err != nil {
 		// Host and key are checked at start, so this only happens on a bug.
@@ -137,6 +170,7 @@ func (s *Sender) Run(ctx context.Context) {
 				s.write(beat)
 				nextBeat = time.Now().Add(min(time.Second, s.Heartbeat))
 			}
+			s.noteBeat(beat.SentAt)
 		}
 		if !ready {
 			s.wait(ctx, time.Until(nextBeat), false)
@@ -171,8 +205,38 @@ func (s *Sender) Run(ctx context.Context) {
 			retry.Sleep(ctx)
 		}
 	}
+	s.drain()
 	if s.conn != nil {
 		s.conn.Close()
+		s.conn = nil
+	}
+}
+
+// drainTime bounds the last sends on shutdown, so lines logged while the machine goes down still get out.
+const drainTime = 2 * time.Second
+
+func (s *Sender) drain() {
+	if !s.ready() {
+		return
+	}
+	deadline := time.Now().Add(drainTime)
+	for time.Now().Before(deadline) {
+		q := s.Queue
+		it, ok := Item{}, false
+		if s.Pstore != nil {
+			q = s.Pstore
+			it, ok = q.Peek()
+		}
+		if !ok {
+			q = s.Queue
+			if it, ok = q.Peek(); !ok {
+				return
+			}
+		}
+		if err := s.send(&wire.Packet{Kind: it.Kind, Record: it.Rec}); err != nil {
+			return
+		}
+		q.Done(it)
 	}
 }
 

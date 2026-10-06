@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -128,6 +129,8 @@ func (u *Users) Basic(name, password string) *User {
 		if hashEqual(user.hash, sum) {
 			return user
 		}
+		// A quick refusal would tell which names are tokens.
+		bcrypt.CompareHashAndPassword(dummyHash(), []byte(password))
 		return nil
 	}
 	u.mu.Lock()
@@ -175,7 +178,9 @@ type Auth struct {
 	Failures interface{ Inc() }
 	Blocked  interface{ Inc() }
 	// ProxyHeader names the header with the client address, like X-Forwarded-For, when behind a reverse proxy.
-	ProxyHeader string
+	// It is only read on requests that come from an address in TrustedProxies.
+	ProxyHeader    string
+	TrustedProxies []netip.Prefix
 
 	limit limiter
 }
@@ -219,13 +224,21 @@ func UserFrom(ctx context.Context) *User {
 func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		users := a.cur.Load()
-		keys := []string{"ip:" + a.clientIP(r)}
+		ipKey := "ip:" + a.clientIP(r)
+		keys := []string{ipKey}
 		name, pass, basic := r.BasicAuth()
+		nameKey := ""
 		if basic {
-			keys = append(keys, "user:"+name)
+			nameKey = "user:" + limitName(name)
+			keys = append(keys, nameKey)
 		}
 		// A blocked client is refused before any password check, which also saves the bcrypt work.
-		if d := a.limit.wait(keys...); d > 0 {
+		// A blocked user name still gets through from an address without failures, so others cannot lock it out.
+		d := a.limit.wait(ipKey)
+		if nameKey != "" && a.limit.failed(ipKey) {
+			d = max(d, a.limit.wait(nameKey))
+		}
+		if d > 0 {
 			if a.Blocked != nil {
 				a.Blocked.Inc()
 			}
@@ -252,7 +265,7 @@ func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 		}
 		// Only the user counter is cleared, so one good account cannot clear the counter of its address.
 		if basic {
-			a.limit.reset("user:" + name)
+			a.limit.reset(nameKey)
 		}
 		if user.Role < min {
 			http.Error(w, "this needs the "+min.String()+" role", http.StatusForbidden)
@@ -330,6 +343,19 @@ type limiter struct {
 	mu      sync.Mutex
 	entries map[string]*failState
 	now     func() time.Time
+	pruned  time.Time
+}
+
+// maxEntries bounds the limiter memory. When full, new keys are not counted until old ones expire.
+const maxEntries = 50000
+
+// limitName keeps user keys short, as the name comes from the client.
+func limitName(name string) string {
+	if len(name) <= 64 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (l *limiter) state(key string, now time.Time) *failState {
@@ -355,18 +381,30 @@ func (l *limiter) wait(keys ...string) time.Duration {
 	return d
 }
 
+// failed reports whether key has failures in the current window.
+func (l *limiter) failed(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.state(key, l.now()) != nil
+}
+
 func (l *limiter) fail(keys ...string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
-	if len(l.entries) > 10000 {
+	// Full scans happen at most once a minute, so a flood of failures stays cheap.
+	if len(l.entries) > maxEntries/5 && now.Sub(l.pruned) > time.Minute {
 		for k := range l.entries {
 			l.state(k, now)
 		}
+		l.pruned = now
 	}
 	for _, k := range keys {
 		s := l.state(k, now)
 		if s == nil {
+			if len(l.entries) >= maxEntries {
+				continue
+			}
 			s = &failState{first: now}
 			l.entries[k] = s
 		}
@@ -383,17 +421,58 @@ func (l *limiter) reset(key string) {
 	l.mu.Unlock()
 }
 
-// clientIP is the address of the caller, or the last address in ProxyHeader when it is set.
+// clientIP is the address of the caller, or the last address in ProxyHeader when the caller is a trusted proxy.
+// IPv6 addresses are cut to their /64, as one client usually owns the whole block.
 func (a *Auth) clientIP(r *http.Request) string {
-	if a.ProxyHeader != "" {
-		if v := r.Header.Get(a.ProxyHeader); v != "" {
-			parts := strings.Split(v, ",")
-			return strings.TrimSpace(parts[len(parts)-1])
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	addr = addr.Unmap()
+	if a.ProxyHeader != "" && a.trusted(addr) {
+		if v := r.Header.Get(a.ProxyHeader); v != "" {
+			parts := strings.Split(v, ",")
+			if fwd, err := netip.ParseAddr(strings.TrimSpace(parts[len(parts)-1])); err == nil {
+				addr = fwd.Unmap()
+			}
+		}
+	}
+	if addr.Is6() {
+		p, _ := addr.Prefix(64)
+		return p.String()
+	}
+	return addr.String()
+}
+
+func (a *Auth) trusted(addr netip.Addr) bool {
+	for _, p := range a.TrustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParsePrefixes reads a comma separated list of addresses or CIDR prefixes.
+func ParsePrefixes(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(f); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(f)
+		if err != nil {
+			return nil, fmt.Errorf("not an address or prefix: %q", f)
+		}
+		out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+	}
+	return out, nil
 }

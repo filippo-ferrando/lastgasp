@@ -63,14 +63,29 @@ func Open(dsn string) (*Store, error) {
 	s := &Store{postgres: strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")}
 	var err error
 	if s.postgres {
-		s.db, err = sql.Open("pgx", dsn)
+		if s.db, err = sql.Open("pgx", dsn); err != nil {
+			return nil, err
+		}
+		// Bounded, so bursts of API calls cannot use up the connections of a shared database.
+		s.db.SetMaxOpenConns(16)
+		s.db.SetMaxIdleConns(4)
+		s.db.SetConnMaxLifetime(30 * time.Minute)
 	} else {
-		s.db, err = sql.Open("sqlite", "file:"+dsn+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)")
+		// The path is part of a URI, where these characters would start the options.
+		if strings.ContainsAny(dsn, "?#") {
+			return nil, fmt.Errorf("store: SQLite path must not contain '?' or '#': %q", dsn)
+		}
+		if s.db, err = sql.Open("sqlite", "file:"+dsn+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"); err != nil {
+			return nil, err
+		}
 		// One connection avoids "database is locked" errors between writers.
 		s.db.SetMaxOpenConns(1)
 	}
-	if err != nil {
-		return nil, err
+	ping, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(ping); err != nil {
+		s.db.Close()
+		return nil, fmt.Errorf("store: connect: %w", err)
 	}
 	if err := s.migrate(context.Background()); err != nil {
 		s.db.Close()
@@ -153,6 +168,13 @@ func (s *Store) migrate(ctx context.Context) error {
 				state TEXT NOT NULL,
 				updated_at BIGINT NOT NULL,
 				PRIMARY KEY (incident_id, target))`,
+		},
+		{
+			// For the crash check, incident pages, alert queries and retention.
+			`CREATE INDEX IF NOT EXISTS records_boot ON records (host, boot_id, source, id)`,
+			`CREATE INDEX IF NOT EXISTS incidents_updated ON incidents (updated_at)`,
+			`CREATE INDEX IF NOT EXISTS incidents_closed ON incidents (closed_at)`,
+			`CREATE INDEX IF NOT EXISTS alerts_target ON alerts (target, state)`,
 		},
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
@@ -322,7 +344,7 @@ func (s *Store) Query(ctx context.Context, f Filter) ([]Record, error) {
 	}
 	if f.Text != "" {
 		// % and _ in the search text are matched as plain characters.
-		esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.ToLower(f.Text))
+		esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s.lower(f.Text))
 		add(`LOWER(message) LIKE ? ESCAPE '\'`, "%"+esc+"%")
 	}
 	if f.AfterID > 0 {
@@ -362,6 +384,19 @@ func (s *Store) Query(ctx context.Context, f Filter) ([]Record, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// lower matches the LOWER() of the database: PostgreSQL lowers all letters, SQLite only A-Z.
+func (s *Store) lower(text string) string {
+	if s.postgres {
+		return strings.ToLower(text)
+	}
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, text)
 }
 
 // Hosts lists every host that has sent at least one packet.

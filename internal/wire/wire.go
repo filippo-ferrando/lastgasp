@@ -220,30 +220,30 @@ func EncodeAck(p *Packet, key []byte) ([]byte, error) {
 	return a.Seal(b, nonce(ctr), inner, b), nil
 }
 
-// DecodeAck checks an ack sent to the agent run (host, bootID, instance) and returns the heartbeat seq it answers.
-func DecodeAck(buf, key []byte, host string, bootID [16]byte, instance uint64) (uint64, error) {
+// DecodeAck checks an ack sent to the agent run (host, bootID, instance). It returns the seq and the
+// SentAt of the heartbeat it answers, so the agent can refuse answers to old heartbeats.
+func DecodeAck(buf, key []byte, host string, bootID [16]byte, instance uint64) (seq uint64, sentAt int64, err error) {
 	h, err := parseHeader(buf)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if h.host != host || h.bootID != bootID || h.instance != instance {
-		return 0, ErrAuth
+		return 0, 0, ErrAuth
 	}
 	a, err := ackAEAD(key, bootID, instance)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	inner, err := a.Open(nil, nonce(h.ctr), buf[h.len:], buf[:h.len])
 	if err != nil {
-		return 0, ErrAuth
+		return 0, 0, ErrAuth
 	}
 	r := reader{b: inner}
-	kind, seq := Kind(r.u8()), r.u64()
-	r.u64()
+	kind, seq, sentAt := Kind(r.u8()), r.u64(), int64(r.u64())
 	if r.bad || len(r.b) != 0 || kind != KindAck {
-		return 0, ErrMalformed
+		return 0, 0, ErrMalformed
 	}
-	return seq, nil
+	return seq, sentAt, nil
 }
 
 // Encode encrypts a single packet with a random nonce counter. Agents use a Sealer instead.

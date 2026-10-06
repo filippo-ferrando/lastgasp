@@ -7,10 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"strconv"
@@ -25,6 +27,18 @@ import (
 // MaxAlertAge limits alerts to incidents updated recently, so a new target is not flooded with old ones.
 const MaxAlertAge = 24 * time.Hour
 
+// maxTries is how often one alert is tried before it is given up, so it cannot block the alerts after it.
+const maxTries = 10
+
+// permanentError is an answer that will not change on retry, like a webhook 400.
+type permanentError struct{ error }
+
+func permanent(err error) bool {
+	var p permanentError
+	var t *textproto.Error
+	return errors.As(err, &p) || errors.As(err, &t) && t.Code >= 500 && t.Code < 600
+}
+
 // Notifier sends incidents to one target, a webhook or an email. An incident is marked sent only after
 // the target took it, so alerts not sent before a restart are sent after it.
 type Notifier struct {
@@ -36,15 +50,16 @@ type Notifier struct {
 	Key         []byte // signs the body when set
 	PublicURL   string // base URL of the web UI, for links
 	MinSeverity store.Severity
-	RateLimit   time.Duration // per host and kind
+	RateLimit   time.Duration // per host, kind and rule
 	Client      *http.Client
 	Metrics     *Metrics
 	Log         *slog.Logger
 
-	once sync.Once
-	wake chan struct{}
-	last map[string]time.Time
-	now  func() time.Time
+	once  sync.Once
+	wake  chan struct{}
+	last  map[string]time.Time
+	tries map[string]int
+	now   func() time.Time
 }
 
 // Payload is the JSON body sent with the "json" format.
@@ -61,6 +76,7 @@ func (n *Notifier) init() {
 	n.once.Do(func() {
 		n.wake = make(chan struct{}, 1)
 		n.last = map[string]time.Time{}
+		n.tries = map[string]int{}
 		if n.now == nil {
 			n.now = time.Now
 		}
@@ -110,7 +126,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	}
 }
 
-// flush sends all pending alerts and stops at the first failure.
+// flush sends all pending alerts. It stops at the first failure that may go away on retry.
 func (n *Notifier) flush(ctx context.Context) error {
 	for {
 		pending, err := n.Store.PendingAlerts(ctx, n.Name, n.MinSeverity, n.now().Add(-MaxAlertAge), 50)
@@ -119,7 +135,9 @@ func (n *Notifier) flush(ctx context.Context) error {
 		}
 		for i := range pending {
 			p := &pending[i]
-			key := p.Host + "|" + p.Kind
+			// Rules have their own limit, so a warning never holds back a critical line of another rule.
+			key := p.Host + "|" + p.Kind + "|" + p.Rule
+			try := strconv.FormatInt(p.ID, 10) + "|" + strconv.FormatBool(p.Resolve)
 			state := store.AlertSent
 			switch {
 			case p.Resolve:
@@ -133,13 +151,20 @@ func (n *Notifier) flush(ctx context.Context) error {
 			if state == store.AlertSent || state == store.AlertResolved {
 				if err := n.send(ctx, p); err != nil {
 					n.Metrics.Alerts.WithLabelValues(n.Name, "failed").Inc()
-					return err
-				}
-				if !p.Resolve {
+					n.tries[try]++
+					if !permanent(err) && n.tries[try] < maxTries {
+						return err
+					}
+					n.Log.Error("alert given up", "target", n.Name, "incident", p.ID, "tries", n.tries[try], "err", err)
+					state = store.AlertFailed
+				} else if !p.Resolve {
 					n.last[key] = n.now()
 				}
+				delete(n.tries, try)
 			}
-			n.Metrics.Alerts.WithLabelValues(n.Name, state).Inc()
+			if state != store.AlertFailed {
+				n.Metrics.Alerts.WithLabelValues(n.Name, state).Inc()
+			}
 			if err := n.Store.SetAlert(ctx, p.ID, n.Name, state, n.now()); err != nil {
 				return err
 			}
@@ -183,7 +208,11 @@ func (n *Notifier) send(ctx context.Context, p *store.PendingAlert) error {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("webhook %s answered %s", n.Name, resp.Status)
+		err := fmt.Errorf("webhook %s answered %s", n.Name, resp.Status)
+		if resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
+			return permanentError{err}
+		}
+		return err
 	}
 	return nil
 }

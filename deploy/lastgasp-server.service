@@ -4,12 +4,35 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/lastgasp-server -listen :5140 -http :8080 -db /var/lib/lastgasp/lastgasp.db -key-file /etc/lastgasp/keys
+# A fixed user, so the key and auth files can be root:lastgasp mode 640 instead of readable by everyone.
+# Create it once with: useradd --system --no-create-home --shell /usr/sbin/nologin lastgasp
+User=lastgasp
+Group=lastgasp
 StateDirectory=lastgasp
-DynamicUser=yes
-# Reloads the key file and the rules file.
+# The web UI listens on localhost only. Set -auth-file before opening it to the network.
+ExecStart=/usr/local/bin/lastgasp-server -listen :5140 -http 127.0.0.1:8080 -db /var/lib/lastgasp/lastgasp.db -key-file /etc/lastgasp/keys -retain 720h
+# Reloads the key file, the rules file and the auth file.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
+RestartSec=2
+# Time to store queued packets and save state on stop.
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

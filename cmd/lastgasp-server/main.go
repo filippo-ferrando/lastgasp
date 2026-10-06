@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,9 +46,10 @@ func main() {
 		alertFormat  = flag.String("alert-format", "json", "default alert body: json, or slack for Slack and Mattermost")
 		alertKey     = flag.String("alert-key-file", "", "default hex key file used to sign alerts in the X-Lastgasp-Signature header")
 		alertMin     = flag.String("alert-min-severity", "warning", "default lowest severity that sends an alert: info, warning or critical")
-		alertRate    = flag.Duration("alert-rate-limit", 10*time.Minute, "default limit of one alert per host and incident kind in this time")
+		alertRate    = flag.Duration("alert-rate-limit", 10*time.Minute, "default limit of one alert per host, incident kind and rule in this time")
 		authFile     = flag.String("auth-file", "", "users and API tokens for the web UI and API (\"name role hash\" lines), empty for no login")
 		authProxy    = flag.String("auth-proxy-header", "", "header with the client address set by a reverse proxy, like X-Forwarded-For")
+		authTrusted  = flag.String("auth-trusted-proxies", "127.0.0.1,::1", "comma separated addresses or CIDR prefixes allowed to set -auth-proxy-header")
 		authMetrics  = flag.Bool("auth-metrics", false, "also require a login for /metrics")
 		publicURL    = flag.String("public-url", "", "web UI address used for links in alerts, for example https://lastgasp.example.net")
 	)
@@ -63,6 +65,26 @@ func main() {
 	fail := func(msg string, err error) {
 		log.Error(msg, "err", err)
 		os.Exit(1)
+	}
+	// Caught from the start, as the default action of SIGHUP would kill the server while it starts.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+
+	switch {
+	case *stale <= 0:
+		fail("start", errors.New("-stale-after must be above 0"))
+	case *rcvBuf <= 0:
+		fail("start", errors.New("-rcvbuf must be above 0"))
+	case *retain < 0 || *silentAfter < 0 || *crashWait < 0 || *resolveAfter < 0 || *alertRate < 0:
+		fail("start", errors.New("durations must not be negative"))
+	case *retain > 0 && *retain < time.Hour:
+		fail("start", errors.New("-retain must be at least 1h, or 0 to keep everything"))
+	case *ctxLines < 1 || *ctxLines > 10000:
+		fail("start", errors.New("-incident-context must be between 1 and 10000"))
+	}
+	trusted, err := server.ParsePrefixes(*authTrusted)
+	if err != nil {
+		fail("start", fmt.Errorf("-auth-trusted-proxies: %w", err))
 	}
 
 	if *keyFile == "" {
@@ -141,14 +163,15 @@ func main() {
 		fail("load incidents", err)
 	}
 	in.Detector = det
+	var workers sync.WaitGroup
 	if len(targets) > 0 {
 		det.Wake = targets.Wake
-		go targets.Run(ctx)
+		workers.Go(func() { targets.Run(ctx) })
 	}
-	go det.Run(ctx)
+	workers.Go(func() { det.Run(ctx) })
 	if *retain > 0 {
 		r := &server.Retention{Store: st, Tracker: tr, Detector: det, Metrics: metrics, Log: log, Age: *retain, Every: time.Hour}
-		go r.Run(ctx)
+		workers.Go(func() { r.Run(ctx) })
 	}
 
 	conn, err := net.ListenPacket("udp", *listen)
@@ -170,13 +193,12 @@ func main() {
 			fail("load auth file", err)
 		}
 		api.Auth.Failures, api.Auth.Blocked, api.Auth.ProxyHeader = metrics.AuthFailures, metrics.AuthBlocked, *authProxy
+		api.Auth.TrustedProxies = trusted
 	} else if !server.Loopback(*httpAddr) {
 		log.Warn("the web UI and API have no login and listen on a public address, use -auth-file", "http", *httpAddr)
 	}
 
 	// SIGHUP reloads the key file, the rules and the auth file. On error the old ones stay in use.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
 	go func() {
 		for range hup {
 			if err := keys.Reload(); err != nil {
@@ -200,7 +222,9 @@ func main() {
 			}
 		}
 	}()
-	srv := &http.Server{Addr: *httpAddr, Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// No write timeout, as /api/download streams large files.
+	srv := &http.Server{Addr: *httpAddr, Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	// An HTTP error stops the server through the normal shutdown, so state is saved and the database closed.
 	exitCode := 0
 	go func() {
@@ -212,12 +236,17 @@ func main() {
 	}()
 	log.Info("lastgasp-server started", "udp", conn.LocalAddr().String(), "http", *httpAddr, "db", redact(*dsn))
 
+	// Shutdown order: stop taking packets and requests, store what is queued, let the workers save, then close the database.
 	<-ctx.Done()
+	log.Info("shutting down")
 	conn.Close()
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdown)
 	<-done
+	workers.Wait()
+	det.Flush(context.Background())
+	log.Info("stopped")
 	if exitCode != 0 {
 		st.Close()
 		os.Exit(exitCode)

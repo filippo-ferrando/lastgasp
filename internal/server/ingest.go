@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -35,11 +36,27 @@ type Ingestor struct {
 	lastBoot    time.Time         // first_seen of the newest saved boot
 	pstoreBoots map[string]string // host|file -> boot
 	now         func() time.Time
+
+	ackMu   sync.Mutex
+	lastAck map[ackKey]time.Time // per agent run, limits acks to one per ackEvery
 }
+
+type ackKey struct {
+	host     string
+	bootID   [16]byte
+	instance uint64
+}
+
+// ackEvery limits acks per agent run, so replayed heartbeats cannot turn the server into a reflector.
+const ackEvery = 200 * time.Millisecond
+
+// cacheLimit bounds the in-memory caches. They are cleared when full, the database stays the source of truth.
+const cacheLimit = 100000
 
 func NewIngestor(st *store.Store, tr *Tracker, keys KeyLookup, m *Metrics, log *slog.Logger) *Ingestor {
 	return &Ingestor{Store: st, Tracker: tr, Keys: keys, Metrics: m, Log: log,
-		ch: make(chan *wire.Packet, 65536), boots: map[string]bool{}, pstoreBoots: map[string]string{}, now: time.Now}
+		ch: make(chan *wire.Packet, 65536), boots: map[string]bool{}, pstoreBoots: map[string]string{}, now: time.Now,
+		lastAck: map[ackKey]time.Time{}}
 }
 
 // Handle checks one datagram and queues it. It never blocks; a full queue drops the packet.
@@ -73,6 +90,12 @@ func (in *Ingestor) Handle(b []byte) []byte {
 	if p.Kind != wire.KindHeartbeat {
 		return nil
 	}
+	if p.Seq == 0 {
+		in.Metrics.Probes.Inc()
+	}
+	if !in.ackAllowed(ackKey{p.Host, p.BootID, p.Instance}) {
+		return nil
+	}
 	key := in.Keys.Lookup(p.Host)
 	if key == nil {
 		return nil
@@ -82,6 +105,20 @@ func (in *Ingestor) Handle(b []byte) []byte {
 		return nil
 	}
 	return ack
+}
+
+func (in *Ingestor) ackAllowed(k ackKey) bool {
+	in.ackMu.Lock()
+	defer in.ackMu.Unlock()
+	now := in.now()
+	if now.Sub(in.lastAck[k]) < ackEvery {
+		return false
+	}
+	if len(in.lastAck) >= cacheLimit {
+		clear(in.lastAck)
+	}
+	in.lastAck[k] = now
+	return true
 }
 
 // Listen reads datagrams from conn until it is closed.
@@ -108,14 +145,16 @@ func (in *Ingestor) Run(ctx context.Context) {
 	save := time.NewTicker(5 * time.Second)
 	defer save.Stop()
 	batch := make([]*wire.Packet, 0, 512)
+	// Packets already marked as received must reach the database, so writes are not cut by shutdown.
+	work := context.WithoutCancel(ctx)
 	for {
 		select {
 		case <-ctx.Done():
-			in.drain(batch)
-			in.saveStreams(context.Background())
+			in.drain(work, batch)
+			in.saveStreams(work)
 			return
 		case <-save.C:
-			in.saveStreams(ctx)
+			in.saveStreams(work)
 		case p := <-in.ch:
 			batch = append(batch[:0], p)
 		fill:
@@ -127,19 +166,28 @@ func (in *Ingestor) Run(ctx context.Context) {
 					break fill
 				}
 			}
-			in.process(ctx, batch)
+			in.process(work, batch)
 		}
 	}
 }
 
-func (in *Ingestor) drain(batch []*wire.Packet) {
+// drain stores the packets still queued, in full batches.
+func (in *Ingestor) drain(ctx context.Context, batch []*wire.Packet) {
 	for {
-		select {
-		case p := <-in.ch:
-			in.process(context.Background(), append(batch[:0], p))
-		default:
+		batch = batch[:0]
+	fill:
+		for len(batch) < cap(batch) {
+			select {
+			case p := <-in.ch:
+				batch = append(batch, p)
+			default:
+				break fill
+			}
+		}
+		if len(batch) == 0 {
 			return
 		}
+		in.process(ctx, batch)
 	}
 }
 
@@ -227,6 +275,9 @@ func (in *Ingestor) ensureBoot(ctx context.Context, host, boot string, now time.
 	if in.boots[k] {
 		return nil
 	}
+	if len(in.boots) >= cacheLimit {
+		clear(in.boots)
+	}
 	// Boots in the same batch share now, so each gets a later time to keep their order.
 	if !now.After(in.lastBoot) {
 		now = in.lastBoot.Add(time.Microsecond)
@@ -255,6 +306,9 @@ func (in *Ingestor) pstoreBoot(ctx context.Context, host, fileID, boot string) (
 	b, err := in.Store.PstoreBoot(ctx, host, fileID, boot)
 	if err != nil {
 		return "", err
+	}
+	if len(in.pstoreBoots) >= cacheLimit {
+		clear(in.pstoreBoots)
 	}
 	in.pstoreBoots[k] = b
 	return b, nil

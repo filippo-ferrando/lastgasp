@@ -51,6 +51,7 @@ const (
 	AlertSuppressed = "suppressed"
 	AlertResolved   = "resolved" // a second alert said the problem is over
 	AlertSkipped    = "skipped"  // the problem was over before the alert went out, so nothing was sent
+	AlertFailed     = "failed"   // the target refused the alert for good, or kept failing, so it was given up
 )
 
 // AlertState is the alert state of an incident for one target.
@@ -191,6 +192,11 @@ func (s *Store) Incidents(ctx context.Context, f IncidentFilter) ([]Incident, er
 	}
 	query += " ORDER BY i.id DESC LIMIT " + strconv.Itoa(limit)
 	return s.queryIncidents(ctx, query, args...)
+}
+
+// OpenIncidents returns every open incident, oldest first.
+func (s *Store) OpenIncidents(ctx context.Context) ([]Incident, error) {
+	return s.queryIncidents(ctx, `SELECT `+incidentCols+` FROM incidents i WHERE i.closed_at = 0 ORDER BY i.id`)
 }
 
 // PendingAlert is an incident a target has not been told about, or one that is now resolved.

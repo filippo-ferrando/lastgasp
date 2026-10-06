@@ -12,6 +12,7 @@ type Metrics struct {
 	Stored       *prometheus.CounterVec
 	Deduplicated *prometheus.CounterVec
 	QueueDropped prometheus.Counter
+	Probes       prometheus.Counter
 	StoreErrors  prometheus.Counter
 	LostToStore  prometheus.Counter
 	KeyReloads   *prometheus.CounterVec
@@ -35,6 +36,9 @@ func NewMetrics(reg prometheus.Registerer, tr *Tracker, staleAfter time.Duration
 		QueueDropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lastgasp_server_queue_dropped_total", Help: "Valid packets dropped because the server could not keep up.",
 		}),
+		Probes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lastgasp_probes_total", Help: "Probes from agents waiting for a server to answer.",
+		}),
 		StoreErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lastgasp_store_errors_total", Help: "Database errors.",
 		}),
@@ -54,9 +58,15 @@ func NewMetrics(reg prometheus.Registerer, tr *Tracker, staleAfter time.Duration
 			Name: "lastgasp_retention_deleted_total", Help: "Rows deleted because they are older than the retention period.",
 		}, []string{"table"}),
 	}
-	reg.MustRegister(m.Invalid, m.Stored, m.Deduplicated, m.QueueDropped, m.StoreErrors, m.LostToStore, m.KeyReloads, m.AuthFailures, m.AuthBlocked, m.RetentionDeleted,
+	reg.MustRegister(m.Invalid, m.Stored, m.Deduplicated, m.QueueDropped, m.Probes, m.StoreErrors, m.LostToStore, m.KeyReloads, m.AuthFailures, m.AuthBlocked, m.RetentionDeleted,
 		&trackerCollector{tr: tr, staleAfter: staleAfter})
 	return m
+}
+
+// ForgetHost removes the per host label values of a host that retention removed.
+func (m *Metrics) ForgetHost(host string) {
+	m.Stored.DeletePartialMatch(prometheus.Labels{"host": host})
+	m.Deduplicated.DeletePartialMatch(prometheus.Labels{"host": host})
 }
 
 // trackerCollector reads per host packet counters from the tracker at scrape time.

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -69,6 +70,9 @@ func TestKmsgReaderHandlesErrors(t *testing.T) {
 			return nil, syscall.ENOENT
 		case 2:
 			return &fakeSource{results: []any{"6,1,10,-;one", syscall.EPIPE, "garbage", "6,5,20,-;two", syscall.EIO}}, nil
+		case 3:
+			// A reopened device starts again at the oldest record, those already read are skipped.
+			return &fakeSource{results: []any{"6,1,10,-;one", "6,5,20,-;two", "6,6,30,-;three", syscall.EIO}}, nil
 		}
 		cancel()
 		return &fakeSource{}, nil
@@ -76,13 +80,13 @@ func TestKmsgReaderHandlesErrors(t *testing.T) {
 	k.OnEntry = func(e Entry) { got = append(got, e) }
 	k.Run(ctx)
 
-	if len(got) != 2 || got[0].Msg != "one" || got[1].Msg != "two" {
+	if len(got) != 3 || got[0].Msg != "one" || got[1].Msg != "two" || got[2].Msg != "three" {
 		t.Fatalf("got %+v", got)
 	}
-	if stats.KmsgOverruns.Load() != 1 || stats.KmsgInvalid.Load() != 1 || stats.KmsgRead.Load() != 2 {
+	if stats.KmsgOverruns.Load() != 1 || stats.KmsgInvalid.Load() != 1 || stats.KmsgRead.Load() != 3 {
 		t.Fatalf("stats overruns=%d invalid=%d read=%d", stats.KmsgOverruns.Load(), stats.KmsgInvalid.Load(), stats.KmsgRead.Load())
 	}
-	if opens < 3 {
+	if opens < 4 {
 		t.Fatalf("reader did not reopen after errors, opens=%d", opens)
 	}
 }
@@ -115,6 +119,7 @@ func TestReadPstoreSkipsOtherFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "dmesg-ramoops-0"), []byte("<3>[1.000000] a\n"), 0o600)
 	os.WriteFile(filepath.Join(dir, "console-ramoops-0"), []byte("b\n"), 0o600)
 	os.WriteFile(filepath.Join(dir, "ftrace-ramoops-0"), []byte("c\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "dmesg-efi-171234-1.enc.z"), []byte("\x78\x9c binary\n"), 0o600)
 	lines, err := ReadPstore(dir, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -403,15 +408,23 @@ func TestSenderHoldsRecordsUntilAck(t *testing.T) {
 		t.Fatalf("queue has %d records, want 2", q.Len())
 	}
 
-	// An ack for another agent run is ignored.
-	bad, _ := wire.EncodeAck(&wire.Packet{Host: "h", Instance: 8}, testKey)
-	conn.acks <- bad
+	probes := conn.packets(t)
+	probe := probes[len(probes)-1]
+	// Acks for another agent run, or for a heartbeat that is not recent, are ignored.
+	other := *probe
+	other.Instance = 8
+	old := *probe
+	old.SentAt = 12345
+	for _, p := range []*wire.Packet{&other, &old} {
+		bad, _ := wire.EncodeAck(p, testKey)
+		conn.acks <- bad
+	}
 	time.Sleep(50 * time.Millisecond)
 	if q.Len() != 2 {
-		t.Fatal("records sent after an ack for another run")
+		t.Fatal("records sent after a bad ack")
 	}
 
-	ack, _ := wire.EncodeAck(&wire.Packet{Host: "h", Instance: 7}, testKey)
+	ack, _ := wire.EncodeAck(probe, testKey)
 	conn.acks <- ack
 	for q.Len() > 0 && ctx.Err() == nil {
 		time.Sleep(5 * time.Millisecond)
@@ -430,5 +443,89 @@ func TestSenderHoldsRecordsUntilAck(t *testing.T) {
 	}
 	if strings.Join(msgs, ",") != "a,b" || seqs[0] != 1 {
 		t.Fatalf("sent %v with seqs %v", msgs, seqs)
+	}
+}
+
+// nonceCounter reads the clear nonce counter of a sealed packet.
+func nonceCounter(b []byte) uint64 {
+	off := 6 + int(b[5]) + 16 + 8
+	return binary.BigEndian.Uint64(b[off : off+8])
+}
+
+func TestSenderRestartKeepsNoncesUnique(t *testing.T) {
+	conn := &flakyConn{}
+	q := NewQueue(10)
+	s := &Sender{Host: "h", Key: testKey, Queue: q, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}}
+	s.newConn = func() (packetConn, error) { return conn, nil }
+	// Run twice, as the supervisor does after a panic.
+	for _, m := range []string{"a", "b"} {
+		q.Push(Item{Kind: wire.KindKmsg, Rec: wire.Record{Msg: m}})
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for q.Len() > 0 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		s.Run(ctx)
+	}
+	seen := map[uint64]bool{}
+	for _, b := range conn.sent {
+		c := nonceCounter(b)
+		if seen[c] {
+			t.Fatalf("nonce counter %d used twice", c)
+		}
+		seen[c] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("sent %d packets", len(seen))
+	}
+}
+
+func TestSenderDrainsOnShutdown(t *testing.T) {
+	conn := &flakyConn{}
+	q := NewQueue(100)
+	s := &Sender{Host: "h", Key: testKey, Queue: q, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}, Rate: 1}
+	s.newConn = func() (packetConn, error) { return conn, nil }
+	for i := 0; i < 50; i++ {
+		q.Push(Item{Kind: wire.KindKmsg, Rec: wire.Record{Msg: "m"}})
+	}
+	// At one packet per second almost nothing goes out before the stop, the drain sends the rest unpaced.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	s.Run(ctx)
+	if q.Len() != 0 {
+		t.Fatalf("%d records left after shutdown", q.Len())
+	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	good := func() Config {
+		return Config{Servers: []string{"logs:5140"}, Host: "h", Key: testKey, BufferSize: 10, Rate: 100,
+			Heartbeat: 5 * time.Second, ResolveEvery: time.Minute, WaitAck: true}
+	}
+	if c := good(); c.Validate() != nil {
+		t.Fatal(c.Validate())
+	}
+	for name, change := range map[string]func(*Config){
+		"no server":         func(c *Config) { c.Servers = nil },
+		"server port":       func(c *Config) { c.Servers = []string{"logs"} },
+		"bad host":          func(c *Config) { c.Host = "a b" },
+		"short key":         func(c *Config) { c.Key = []byte("x") },
+		"buffer 0":          func(c *Config) { c.BufferSize = 0 },
+		"buffer too big":    func(c *Config) { c.BufferSize = MaxBuffer + 1 },
+		"negative rate":     func(c *Config) { c.Rate = -1 },
+		"tiny heartbeat":    func(c *Config) { c.Heartbeat = time.Millisecond },
+		"wait-ack no beats": func(c *Config) { c.Heartbeat = 0 },
+		"resolve loop":      func(c *Config) { c.ResolveEvery = 0 },
+		"dns without port":  func(c *Config) { c.DNSServer = "10.0.0.53" },
+	} {
+		c := good()
+		change(&c)
+		if c.Validate() == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

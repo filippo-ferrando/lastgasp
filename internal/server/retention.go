@@ -58,11 +58,20 @@ func (r *Retention) RunOnce(ctx context.Context, now time.Time) error {
 	for i, s := range streams {
 		if err := r.Store.DeleteStream(ctx, s.Host, s.BootID, s.Instance); err != nil {
 			// Put the rest back, so they are deleted on the next run.
-			r.Tracker.Load(streams[i:])
+			r.Tracker.Restore(streams[i:])
 			return err
 		}
 	}
 	r.Metrics.RetentionDeleted.WithLabelValues("streams").Add(float64(len(streams)))
+	live := map[string]bool{}
+	for _, s := range r.Tracker.Snapshot() {
+		live[s.Host] = true
+	}
+	for _, s := range streams {
+		if !live[s.Host] {
+			r.Metrics.ForgetHost(s.Host)
+		}
+	}
 	if r.Detector != nil {
 		r.Detector.Forget(cutoff)
 	}

@@ -763,3 +763,13 @@ func TestRetiredBootIsNoReboot(t *testing.T) {
 		t.Fatalf("newest boot is %s", hosts[0].LastBoot)
 	}
 }
+
+func TestUIHasControls(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	page := e.get(t, "/")
+	for _, id := range []string{"inc-ack", "inc-copy", "inc-logs", "inc-msg", "f-clear", "f-live", "more", "jump", "download"} {
+		if !strings.Contains(page, `id="`+id+`"`) {
+			t.Errorf("control %q missing", id)
+		}
+	}
+}

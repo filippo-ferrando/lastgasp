@@ -64,6 +64,27 @@ dialog pre { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px so
   font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 45vh; overflow: auto; }
 pre .ln { display: block; }
 pre .hit { background: color-mix(in srgb, var(--bad) 22%, transparent); }
+button:hover:not(:disabled), a.btn:hover, select:hover, input:hover { border-color: var(--muted); }
+button:focus-visible, a.btn:focus-visible, select:focus-visible, input:focus-visible, tr.click:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 600; }
+.grow { flex: 1; }
+#status.bad { color: var(--bad); }
+.chip { font-size: 12px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.hostlink { cursor: pointer; }
+.hostlink:hover { color: var(--accent); }
+.jump { position: sticky; bottom: 8px; display: flex; justify-content: center; pointer-events: none; }
+.jump button { pointer-events: auto; font-family: system-ui, sans-serif; box-shadow: 0 2px 8px rgb(0 0 0 / .2); }
+.msg { margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--bad); color: var(--bad); }
+dialog .head button { white-space: nowrap; }
+#logs td.meta { width: 1%; }
+dialog .head { flex-wrap: wrap; }
+@media (max-width: 640px) {
+  header, main { padding-left: 10px; padding-right: 10px; }
+  #logs td { padding: 4px 6px; }
+  dialog .head h3 { flex-basis: 100%; }
+}
 </style>
 </head>
 <body>
@@ -74,48 +95,58 @@ pre .hit { background: color-mix(in srgb, var(--bad) 22%, transparent); }
 </header>
 <main>
   <section>
-    <h2>Incidents <label class="live"><input type="checkbox" id="inc-open"> open only</label></h2>
+    <h2><span>Incidents <span class="chip" id="inc-count"></span></span>
+      <label class="live chip"><input type="checkbox" id="inc-open"> open only</label></h2>
     <div class="scroll" id="incidents"></div>
   </section>
 
   <section>
-    <h2>Hosts <span id="hostcount"></span></h2>
-    <div class="scroll"><table id="hosts"></table></div>
+    <h2>Hosts <span class="chip" id="hostcount"></span></h2>
+    <div class="scroll" id="hosts"></div>
   </section>
 
   <section>
-    <h2>Missing packets <span class="muted" id="gapnote"></span></h2>
+    <h2>Missing packets <span class="chip" id="gapnote"></span></h2>
     <div class="scroll" id="gaps"></div>
   </section>
 
-  <section>
-    <h2>Logs <span id="logcount"></span></h2>
+  <section id="logs-section">
+    <h2>Logs <span class="chip" id="logcount"></span></h2>
     <div class="filters">
-      <select id="f-host"><option value="">all hosts</option></select>
-      <select id="f-level">
+      <select id="f-host" aria-label="host"><option value="">all hosts</option></select>
+      <select id="f-level" aria-label="level">
         <option value="">all levels</option>
         <option value="0">emerg</option><option value="1">alert and above</option>
         <option value="2">crit and above</option><option value="3">err and above</option>
         <option value="4">warning and above</option><option value="5">notice and above</option>
         <option value="6">info and above</option>
       </select>
-      <select id="f-source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option></select>
-      <input id="f-q" type="search" placeholder="search text">
-      <label class="live"><input type="checkbox" id="f-live" checked> live</label>
-      <button id="more">older</button>
-      <a class="btn" id="download" href="/api/download">download</a>
+      <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option></select>
+      <input id="f-q" type="search" placeholder="search text" aria-label="search text" title="Press / to search, Escape to clear">
+      <button id="f-clear" hidden>clear filters</button>
+      <span class="grow"></span>
+      <label class="live" title="Add new lines as they arrive"><input type="checkbox" id="f-live" checked> live</label>
+      <button id="more" title="Load 300 older lines">older</button>
+      <a class="btn" id="download" href="/api/download" title="Save all matching lines as NDJSON">download</a>
     </div>
-    <div id="logs"><table><tbody id="logrows"></tbody></table></div>
+    <div id="logs"><table><tbody id="logrows"></tbody></table>
+      <div class="jump"><button id="jump" hidden></button></div></div>
   </section>
 </main>
-<dialog id="inc-dialog">
-  <div class="head"><h3 id="inc-title"></h3><button id="inc-ack">acknowledge</button><button id="inc-close">close</button></div>
-  <div class="body" id="inc-body"></div>
+<dialog id="inc-dialog" aria-labelledby="inc-title">
+  <div class="head"><h3 id="inc-title"></h3>
+    <button id="inc-copy" title="Copy a link to this incident">copy link</button>
+    <button id="inc-logs" title="Show the logs of this host">show logs</button>
+    <button id="inc-ack" class="primary">acknowledge</button>
+    <button id="inc-close" title="Close (Escape)">close</button></div>
+  <div class="body"><div class="msg" id="inc-msg" hidden></div><div id="inc-body"></div></div>
 </dialog>
 <script>
 const LEVELS = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
+const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error"};
+const PAGE = 300;
 const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const fmtNum = n => Number(n).toLocaleString();
 const ago = t => {
   const s = Math.max(0, (Date.now() - new Date(t)) / 1000);
@@ -125,40 +156,97 @@ const ago = t => {
   return Math.round(s / 86400) + "d ago";
 };
 const tsFmt = us => (us / 1e6).toFixed(6).padStart(13, " ");
+// Age cells are filled by tickAges, so a table only changes when its data changes.
+const age = t => `<td class="muted" data-t="${esc(t)}" title="${esc(new Date(t).toLocaleString())}"></td>`;
 
-let newestId = 0, oldestId = 0;
+function tickAges() {
+  for (const el of document.querySelectorAll("[data-t]")) el.textContent = ago(el.dataset.t);
+}
+
+class HTTPError extends Error {
+  constructor(status, text) { super(text || "HTTP " + status); this.status = status; }
+}
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new HTTPError(r.status, (await r.text()).trim());
+  return r.json();
+}
+
+// render replaces the content of el only when it changed, and not while text in it is selected.
+// The focused row keeps the focus.
+function render(el, html) {
+  if (el.lastHTML === html) return;
+  const sel = getSelection();
+  if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
+  const f = document.activeElement;
+  const key = f && el.contains(f) ? f.dataset.key : null;
+  el.innerHTML = html;
+  el.lastHTML = html;
+  if (key) el.querySelector(`[data-key="${CSS.escape(key)}"]`)?.focus();
+}
+
+// Filters live in the address, so a view can be shared and survives a reload.
+const FILTERS = [["host", "f-host"], ["level", "f-level"], ["source", "f-source"], ["q", "f-q"]];
 
 function filterQuery() {
   const p = new URLSearchParams();
-  for (const [k, id] of [["host", "f-host"], ["level", "f-level"], ["source", "f-source"], ["q", "f-q"]]) {
-    if ($(id).value) p.set(k, $(id).value);
-  }
+  for (const [k, id] of FILTERS) if ($(id).value) p.set(k, $(id).value);
   return p;
 }
 
-async function getJSON(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(url + ": " + r.status);
-  return r.json();
+function saveFilters() {
+  const p = filterQuery();
+  if ($("inc-open").checked) p.set("open", "1");
+  const q = p.toString();
+  history.replaceState(null, "", location.pathname + (q ? "?" + q : "") + location.hash);
+  $("f-clear").hidden = !filterQuery().toString();
+  $("download").href = "/api/download?" + filterQuery();
 }
+
+function setHostOption(host) {
+  const sel = $("f-host");
+  if (host && ![...sel.options].some(o => o.value === host)) sel.add(new Option(host, host));
+}
+
+function loadFilters() {
+  const p = new URLSearchParams(location.search);
+  setHostOption(p.get("host"));
+  for (const [k, id] of FILTERS) $(id).value = p.get(k) || "";
+  $("inc-open").checked = p.get("open") === "1";
+  saveFilters();
+}
+
+function setHost(host) {
+  setHostOption(host);
+  $("f-host").value = host;
+  filtersChanged();
+}
+
+function filtersChanged() {
+  saveFilters();
+  reloadLogs();
+  refresh();
+}
+
+// Hosts
 
 async function loadHosts() {
   const hosts = await getJSON("/api/hosts");
   $("hostcount").textContent = hosts.length ? hosts.filter(h => h.up).length + " of " + hosts.length + " up" : "";
-  const sel = $("f-host");
-  for (const h of hosts) {
-    if (![...sel.options].some(o => o.value === h.host)) sel.add(new Option(h.host, h.host));
-  }
-  if (!hosts.length) { $("hosts").innerHTML = '<tr><td class="empty">No agent has sent anything yet.</td></tr>'; return; }
+  for (const h of hosts) setHostOption(h.host);
+  if (!hosts.length) return render($("hosts"), '<div class="empty">No agent has sent anything yet.</div>');
   const cls = (v, c) => v > 0 ? ` class="num ${c}"` : ' class="num"';
-  $("hosts").innerHTML = `<tr><th>Host</th><th>Last seen</th><th>Boots</th><th class="num">Received</th>
-    <th class="num" title="Packets that never arrived">Missing</th><th class="num" title="Packets that arrived out of order">Late</th>
+  const cur = $("f-host").value;
+  render($("hosts"), `<table><tr><th>Host</th><th>Last seen</th><th>Boots</th><th class="num">Received</th>
+    <th class="num" title="Packets that never arrived">Missing</th><th class="num" title="Packets that arrived out of order or were sent again">Late</th>
     <th class="num">Duplicates</th><th class="num" title="Dropped by the agent because its buffer was full">Agent drops</th>
     <th class="num" title="Kernel overwrote records before the agent read them">Kernel overruns</th>
-    <th class="num">Send errors</th><th class="num">Buffered</th></tr>` +
-    hosts.map(h => `<tr class="click${$("f-host").value === h.host ? " sel" : ""}" data-host="${esc(h.host)}">
-      <td><span class="dot ${h.up ? "up" : "down"}"></span>${esc(h.host)}</td>
-      <td class="muted" title="${esc(h.last_seen)}">${ago(h.last_seen)}</td>
+    <th class="num">Send errors</th><th class="num" title="Records the agent holds until a server confirms them">Buffered</th></tr>` +
+    hosts.map(h => `<tr class="click${cur === h.host ? " sel" : ""}" tabindex="0" data-key="${esc(h.host)}"
+      title="${cur === h.host ? "Show all hosts" : "Show only " + esc(h.host)}" aria-pressed="${cur === h.host}">
+      <td><span class="dot ${h.up ? "up" : "down"}" title="${h.up ? "up" : "down"}"></span>${esc(h.host)}</td>
+      ${age(h.last_seen)}
       <td class="num">${h.boots}</td>
       <td class="num">${fmtNum(h.received)}</td>
       <td${cls(h.missing, "bad")}>${fmtNum(h.missing)}</td>
@@ -167,103 +255,147 @@ async function loadHosts() {
       <td${cls(h.agent.BufferDrops, "bad")}>${fmtNum(h.agent.BufferDrops)}</td>
       <td${cls(h.agent.KmsgOverruns, "warn")}>${fmtNum(h.agent.KmsgOverruns)}</td>
       <td${cls(h.agent.SendErrors, "warn")}>${fmtNum(h.agent.SendErrors)}</td>
-      <td class="num">${fmtNum(h.agent.Buffered)}</td></tr>`).join("");
-  for (const tr of $("hosts").querySelectorAll("tr.click")) {
-    tr.onclick = () => { $("f-host").value = $("f-host").value === tr.dataset.host ? "" : tr.dataset.host; reloadLogs(); refresh(); };
-  }
+      <td class="num">${fmtNum(h.agent.Buffered)}</td></tr>`).join("") + "</table>");
 }
+
+// Missing packets
 
 async function loadGaps() {
   const host = $("f-host").value;
   const streams = await getJSON("/api/streams" + (host ? "?host=" + encodeURIComponent(host) : ""));
-  $("gapnote").textContent = host ? host : "";
-  if (!streams.length) { $("gaps").innerHTML = '<div class="empty">No missing packets.</div>'; return; }
+  $("gapnote").textContent = host ? "of " + host : "";
+  if (!streams.length) return render($("gaps"), '<div class="empty">No missing packets.</div>');
   const show = rs => {
     const parts = rs.slice(-20).map(r => r.from === r.to ? r.from : r.from + "-" + r.to);
     return (rs.length > 20 ? "... " : "") + parts.join(", ");
   };
-  $("gaps").innerHTML = `<table><tr><th>Host</th><th>Boot</th><th>Agent run</th><th>Last seen</th>
+  render($("gaps"), `<table><tr><th>Host</th><th>Boot</th><th>Agent run</th><th>Last seen</th>
     <th class="num">Missing</th><th class="num">Highest seq</th><th>Missing sequence numbers</th></tr>` +
-    streams.map(s => `<tr><td>${esc(s.host)}</td><td class="muted">${esc(s.boot_id.slice(0, 8))}</td>
-      <td class="muted">${esc(s.instance)}</td><td class="muted">${ago(s.last_seen)}</td>
+    streams.map(s => `<tr><td>${esc(s.host)}</td><td class="muted" title="${esc(s.boot_id)}">${esc(s.boot_id.slice(0, 8))}</td>
+      <td class="muted">${esc(s.instance)}</td>${age(s.last_seen)}
       <td class="num bad">${fmtNum(s.gaps - s.recovered)}</td><td class="num">${fmtNum(s.max_seq)}</td>
-      <td class="ranges">${esc(show(s.missing_ranges))}</td></tr>`).join("") + "</table>";
+      <td class="ranges">${esc(show(s.missing_ranges))}</td></tr>`).join("") + "</table>");
 }
+
+// Logs. gen grows on every filter change, so answers to older requests are thrown away.
+
+const logs = {gen: 0, newest: 0, oldest: 0, noOlder: false, loadingOlder: false, unseen: 0};
 
 function logRow(r) {
   const part = r.parts > 1 ? ` <span class="tag">part ${r.part}/${r.parts}</span>` : "";
   const src = r.source === "pstore" ? ' <span class="tag pstore" title="Saved by the kernel before a crash or reboot">pstore</span>' : "";
-  return `<tr><td class="meta">${esc(r.host)}</td><td class="meta" title="boot ${esc(r.boot_id)}">[${tsFmt(r.ts_usec)}]</td>
+  return `<tr><td class="meta hostlink" data-host="${esc(r.host)}" title="Show only ${esc(r.host)}">${esc(r.host)}</td>
+    <td class="meta" title="boot ${esc(r.boot_id)}, received ${esc(new Date(r.received_at).toLocaleString())}">[${tsFmt(r.ts_usec)}]</td>
     <td class="meta lv${r.level}">${LEVELS[r.level]}</td><td class="lv${r.level}">${esc(r.message)}${part}${src}</td></tr>`;
 }
 
-async function reloadLogs() {
-  const recs = await getJSON("/api/logs?" + filterQuery() + "&limit=300");
-  $("logrows").innerHTML = recs.slice().reverse().map(logRow).join("");
-  newestId = recs.length ? recs[0].id : 0;
-  oldestId = recs.length ? recs[recs.length - 1].id : 0;
-  $("download").href = "/api/download?" + filterQuery();
+const atBottom = () => { const b = $("logs"); return b.scrollHeight - b.scrollTop - b.clientHeight < 40; };
+
+function toBottom() {
   $("logs").scrollTop = $("logs").scrollHeight;
-  updateCount();
+  logs.unseen = 0;
+  updateLogUI();
+}
+
+function updateLogUI() {
+  const n = $("logrows").dataset.empty ? 0 : $("logrows").rows.length;
+  $("logcount").textContent = fmtNum(n) + " shown" + ($("f-live").checked ? "" : ", paused");
+  const more = $("more");
+  more.disabled = logs.loadingOlder || logs.noOlder || !logs.oldest;
+  more.textContent = logs.loadingOlder ? "loading..." : logs.noOlder && n ? "no older lines" : "older";
+  $("jump").hidden = !logs.unseen;
+  $("jump").textContent = "jump to newest (" + fmtNum(logs.unseen) + " new)";
+}
+
+async function reloadLogs() {
+  const gen = ++logs.gen;
+  const p = filterQuery();
+  p.set("limit", PAGE);
+  let recs;
+  try {
+    recs = await getJSON("/api/logs?" + p);
+  } catch (e) {
+    if (gen === logs.gen) setStatus(e);
+    return;
+  }
+  if (gen !== logs.gen) return;
+  $("logrows").innerHTML = recs.length ? recs.slice().reverse().map(logRow).join("")
+    : `<tr><td class="empty">${filterQuery().toString() ? "No lines match these filters." : "No lines yet."}</td></tr>`;
+  if (!recs.length) $("logrows").dataset.empty = "1"; else delete $("logrows").dataset.empty;
+  logs.newest = recs.length ? recs[0].id : 0;
+  logs.oldest = recs.length ? recs[recs.length - 1].id : 0;
+  logs.noOlder = recs.length < PAGE;
+  logs.loadingOlder = false;
+  toBottom();
 }
 
 async function pollLogs() {
+  if (!$("f-live").checked) return;
   // after_id=0 means no filter on the server, so an empty view loads like a fresh page.
-  if (!newestId) return reloadLogs();
+  if (!logs.newest) return reloadLogs();
+  const gen = logs.gen;
   const p = filterQuery();
-  p.set("after_id", newestId);
+  p.set("after_id", logs.newest);
   const recs = await getJSON("/api/logs?" + p);
-  if (!recs.length) return;
-  const box = $("logs");
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  if (gen !== logs.gen || !recs.length) return;
+  const bottom = atBottom();
   $("logrows").insertAdjacentHTML("beforeend", recs.map(logRow).join(""));
-  newestId = recs[recs.length - 1].id;
-  if (!oldestId) oldestId = recs[0].id;
-  if (atBottom) box.scrollTop = box.scrollHeight;
-  updateCount();
+  logs.newest = recs[recs.length - 1].id;
+  if (bottom) toBottom();
+  else { logs.unseen += recs.length; updateLogUI(); }
 }
 
 async function loadOlder() {
-  if (!oldestId) return;
+  if (!logs.oldest || logs.loadingOlder) return;
+  const gen = logs.gen;
+  logs.loadingOlder = true;
+  updateLogUI();
   const p = filterQuery();
-  p.set("before_id", oldestId);
-  p.set("limit", 300);
-  const recs = await getJSON("/api/logs?" + p);
-  if (!recs.length) return;
-  const box = $("logs"), h = box.scrollHeight;
-  $("logrows").insertAdjacentHTML("afterbegin", recs.slice().reverse().map(logRow).join(""));
-  oldestId = recs[recs.length - 1].id;
-  box.scrollTop += box.scrollHeight - h;
-  updateCount();
+  p.set("before_id", logs.oldest);
+  p.set("limit", PAGE);
+  try {
+    const recs = await getJSON("/api/logs?" + p);
+    if (gen !== logs.gen) return;
+    const box = $("logs"), h = box.scrollHeight;
+    $("logrows").insertAdjacentHTML("afterbegin", recs.slice().reverse().map(logRow).join(""));
+    if (recs.length) logs.oldest = recs[recs.length - 1].id;
+    logs.noOlder = recs.length < PAGE;
+    box.scrollTop += box.scrollHeight - h;
+  } catch (e) {
+    setStatus(e);
+  } finally {
+    if (gen === logs.gen) logs.loadingOlder = false;
+    updateLogUI();
+  }
 }
 
-function updateCount() { $("logcount").textContent = fmtNum($("logrows").rows.length) + " shown"; }
+// Incidents
 
-const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error"};
+const state = i => [i.closed_at ? (i.resolved ? "resolved" : "closed") : "open", i.acked_at ? "seen" : "",
+  ...(i.alerts || []).map(a => a.target + " " + a.state)].filter(Boolean).map(esc).join(", ");
 
 async function loadIncidents() {
   const p = new URLSearchParams({limit: 50});
   if ($("f-host").value) p.set("host", $("f-host").value);
   if ($("inc-open").checked) p.set("open", "1");
   const list = await getJSON("/api/incidents?" + p);
-  if (!list.length) { $("incidents").innerHTML = '<div class="empty">No incidents.</div>'; return; }
-  $("incidents").innerHTML = `<table><tr><th>Severity</th><th>Opened</th><th>Host</th><th>Kind</th>
+  const open = list.filter(i => !i.closed_at).length;
+  $("inc-count").textContent = list.length ? open + " open" + ($("f-host").value ? " on " + $("f-host").value : "") : "";
+  if (!list.length) {
+    return render($("incidents"), `<div class="empty">${$("inc-open").checked ? "No open incidents." : "No incidents."}</div>`);
+  }
+  render($("incidents"), `<table><tr><th>Severity</th><th>Opened</th><th>Host</th><th>Kind</th>
     <th class="num">Count</th><th>State</th><th>Summary</th></tr>` +
-    list.map(i => `<tr class="click${i.closed_at ? " closed" : ""}" data-id="${i.id}">
+    list.map(i => `<tr class="click${i.closed_at ? " closed" : ""}" tabindex="0" data-key="${i.id}" title="Open incident ${i.id}">
       <td class="sev sev-${esc(i.severity)}">${esc(i.severity)}</td>
-      <td class="muted" title="${esc(i.opened_at)}">${ago(i.opened_at)}</td>
+      ${age(i.opened_at)}
       <td>${esc(i.host)}</td><td>${esc(KINDS[i.kind] || i.kind)}${i.rule ? ` <span class="tag">${esc(i.rule)}</span>` : ""}</td>
       <td class="num">${fmtNum(i.count)}</td>
       <td class="muted">${state(i)}</td>
-      <td class="summary" title="${esc(i.summary)}">${esc(i.summary)}</td></tr>`).join("") + "</table>";
-  for (const tr of $("incidents").querySelectorAll("tr.click")) tr.onclick = () => { location.hash = "incident=" + tr.dataset.id; };
+      <td class="summary" title="${esc(i.summary)}">${esc(i.summary)}</td></tr>`).join("") + "</table>");
 }
 
-let shownIncident = 0, isAdmin = true;
-
-// state describes an incident: open or closed, resolved, seen, and the alert state per target.
-const state = i => [i.closed_at ? (i.resolved ? "resolved" : "closed") : "open", i.acked_at ? "seen" : "",
-  ...(i.alerts || []).map(a => a.target + " " + a.state)].filter(Boolean).map(esc).join(", ");
+let shown = null, isAdmin = true;
 
 async function loadMe() {
   const me = await getJSON("/api/me");
@@ -271,14 +403,43 @@ async function loadMe() {
   $("who").textContent = me.auth ? me.user + " (" + me.role + ")" : "";
 }
 
+function incidentMsg(text) {
+  $("inc-msg").hidden = !text;
+  $("inc-msg").textContent = text || "";
+}
+
+function setAckButton(i) {
+  const b = $("inc-ack");
+  b.hidden = !isAdmin || !i;
+  b.disabled = !i || !!i.acked_at;
+  b.textContent = i && i.acked_at ? "acknowledged" : "acknowledge";
+  b.title = i && i.acked_at ? "Seen " + new Date(i.acked_at).toLocaleString() : "Mark as seen";
+}
+
 async function showIncident(id) {
-  const v = await getJSON("/api/incidents/" + id);
+  if (!$("inc-dialog").open || !shown || shown.id !== +id) {
+    shown = null;
+    $("inc-title").textContent = "Incident " + id;
+    $("inc-body").innerHTML = '<div class="empty">loading</div>';
+    for (const b of ["inc-copy", "inc-logs"]) $(b).disabled = true;
+    setAckButton(null);
+    incidentMsg("");
+    if (!$("inc-dialog").open) $("inc-dialog").showModal();
+  }
+  let v;
+  try {
+    v = await getJSON("/api/incidents/" + id);
+  } catch (e) {
+    $("inc-body").innerHTML = "";
+    return incidentMsg(e.status === 404 ? "Incident " + id + " does not exist, retention may have removed it." : "Cannot load the incident: " + e.message);
+  }
+  if (location.hash !== "#incident=" + id) return;
   const i = v.incident;
-  shownIncident = i.id;
+  shown = i;
+  for (const b of ["inc-copy", "inc-logs"]) $(b).disabled = false;
+  setAckButton(i);
   $("inc-title").innerHTML = `<span class="sev sev-${esc(i.severity)}">${esc(i.severity)}</span>
     ${esc(i.host)}: ${esc(KINDS[i.kind] || i.kind)}${i.rule ? " (" + esc(i.rule) + ")" : ""}`;
-  $("inc-ack").disabled = !!i.acked_at;
-  $("inc-ack").hidden = !isAdmin;
   const line = r => `<span class="ln${r.message === i.summary || r.id === i.last_record_id && i.kind === "kernel_error" ? " hit" : ""}">` +
     `[${tsFmt(r.ts_usec)}] ${esc(LEVELS[r.level] || "")} ${esc(r.message)}</span>`;
   const block = rs => rs.map(line).join("");
@@ -288,45 +449,141 @@ async function showIncident(id) {
     (v.pstore.length ? `<h4>Saved by the kernel before the reboot (pstore, ${fmtNum(v.pstore.length)} lines)</h4><pre>${block(v.pstore)}</pre>` : "") +
     `<h4>Last kernel lines received (${fmtNum(v.records.length)})</h4>` +
     (v.records.length ? `<pre id="inc-tail">${block(v.records)}</pre>` : '<div class="empty">No lines received for this boot.</div>');
-  if (!$("inc-dialog").open) $("inc-dialog").showModal();
   const tail = $("inc-tail");
   if (tail) tail.scrollTop = tail.scrollHeight;
 }
 
-function route() {
-  const m = location.hash.match(/^#incident=(\d+)$/);
-  if (m) showIncident(m[1]).catch(e => { $("status").textContent = e.message; });
-  else if ($("inc-dialog").open) $("inc-dialog").close();
+function closeIncident() {
+  if ($("inc-dialog").open) $("inc-dialog").close();
 }
 
-$("inc-close").onclick = () => { history.replaceState(null, "", location.pathname + location.search); $("inc-dialog").close(); };
-$("inc-dialog").onclose = () => { if (location.hash) history.replaceState(null, "", location.pathname + location.search); };
-$("inc-ack").onclick = async () => {
-  await fetch("/api/incidents/" + shownIncident + "/ack", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
-  $("inc-ack").disabled = true;
-  loadIncidents();
+function route() {
+  const m = location.hash.match(/^#incident=(\d+)$/);
+  if (m) showIncident(m[1]);
+  else closeIncident();
+}
+
+$("inc-close").onclick = closeIncident;
+$("inc-dialog").onclose = () => {
+  shown = null;
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
 };
-$("inc-open").onchange = loadIncidents;
-window.onhashchange = route;
+// A click on the backdrop lands on the dialog itself, outside its box.
+$("inc-dialog").onclick = e => {
+  const r = $("inc-dialog").getBoundingClientRect();
+  if (e.target === $("inc-dialog") && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) closeIncident();
+};
+$("inc-ack").onclick = async () => {
+  if (!shown) return;
+  const b = $("inc-ack"), id = shown.id;
+  b.disabled = true;
+  b.textContent = "saving...";
+  incidentMsg("");
+  try {
+    const i = await getJSON("/api/incidents/" + id + "/ack", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+    if (shown && shown.id === id) { shown = i; setAckButton(i); }
+    loadIncidents().catch(() => {});
+  } catch (e) {
+    setAckButton(shown);
+    incidentMsg(e.status === 403 ? "Only admins can acknowledge incidents." : "Not acknowledged: " + e.message);
+  }
+};
+$("inc-copy").onclick = async () => {
+  const b = $("inc-copy");
+  try {
+    await navigator.clipboard.writeText(location.href);
+    b.textContent = "copied";
+  } catch {
+    b.textContent = "copy failed";
+  }
+  setTimeout(() => { b.textContent = "copy link"; }, 1500);
+};
+$("inc-logs").onclick = () => {
+  if (!shown) return;
+  const host = shown.host;
+  closeIncident();
+  $("f-level").value = $("f-source").value = $("f-q").value = "";
+  setHost(host);
+  $("logs-section").scrollIntoView({behavior: "smooth"});
+};
+
+// Rows act on click, Enter and Space.
+
+function onActivate(el, fn) {
+  el.addEventListener("click", e => fn(e.target, e));
+  el.addEventListener("keydown", e => {
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches("[tabindex]")) { e.preventDefault(); fn(e.target, e); }
+  });
+}
+
+onActivate($("incidents"), t => {
+  const tr = t.closest("tr.click");
+  if (tr && !getSelection().toString()) location.hash = "incident=" + tr.dataset.key;
+});
+onActivate($("hosts"), t => {
+  const tr = t.closest("tr.click");
+  if (tr && !getSelection().toString()) setHost($("f-host").value === tr.dataset.key ? "" : tr.dataset.key);
+});
+onActivate($("logrows"), t => {
+  const td = t.closest(".hostlink");
+  if (td && !getSelection().toString()) setHost(td.dataset.host);
+});
+
+// Status and refresh
+
+function setStatus(e) {
+  $("status").classList.toggle("bad", !!e);
+  $("status").textContent = e ? (e.status ? "server error: " + e.message : "server not reachable, retrying") :
+    "updated " + new Date().toLocaleTimeString();
+}
+
+let timer, running = false, again = false;
 
 async function refresh() {
+  clearTimeout(timer);
+  // A refresh asked for while one runs, after a filter change, runs right after it.
+  if (running) { again = true; return; }
+  running = true;
+  again = false;
   try {
-    await Promise.all([loadIncidents(), loadHosts(), loadGaps(), $("f-live").checked ? pollLogs() : null]);
-    $("status").textContent = "updated " + new Date().toLocaleTimeString();
+    await Promise.all([loadIncidents(), loadHosts(), loadGaps(), pollLogs()]);
+    setStatus(null);
   } catch (e) {
-    $("status").textContent = "server not reachable: " + e.message;
+    setStatus(e);
+  } finally {
+    running = false;
+    tickAges();
+    // Hidden tabs do not poll; the refresh runs again when the tab is shown.
+    if (!document.hidden) timer = setTimeout(refresh, again ? 0 : 2000);
   }
 }
 
-for (const id of ["f-host", "f-level", "f-source"]) $(id).onchange = () => { reloadLogs(); refresh(); };
-let typing;
-$("f-q").oninput = () => { clearTimeout(typing); typing = setTimeout(reloadLogs, 300); };
-$("more").onclick = loadOlder;
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
-loadMe().catch(() => {});
+for (const id of ["f-host", "f-level", "f-source"]) $(id).onchange = filtersChanged;
+let typing;
+$("f-q").oninput = () => { clearTimeout(typing); typing = setTimeout(filtersChanged, 300); };
+$("f-q").onkeydown = e => {
+  if (e.key === "Enter") { clearTimeout(typing); filtersChanged(); }
+  if (e.key === "Escape" && $("f-q").value) { e.preventDefault(); $("f-q").value = ""; clearTimeout(typing); filtersChanged(); }
+};
+$("f-clear").onclick = () => {
+  for (const [, id] of FILTERS) $(id).value = "";
+  filtersChanged();
+};
+$("inc-open").onchange = () => { saveFilters(); loadIncidents().catch(setStatus); };
+$("f-live").onchange = () => { if ($("f-live").checked) pollLogs().catch(setStatus); updateLogUI(); };
+$("more").onclick = loadOlder;
+$("jump").onclick = toBottom;
+$("logs").onscroll = () => { if (logs.unseen && atBottom()) { logs.unseen = 0; updateLogUI(); } };
+document.addEventListener("keydown", e => {
+  if (e.key === "/" && !e.target.matches("input, select, textarea") && !$("inc-dialog").open) { e.preventDefault(); $("f-q").focus(); }
+});
+window.onhashchange = route;
+
+loadFilters();
+loadMe().catch(() => {}).finally(route);
 reloadLogs().then(refresh);
-route();
-setInterval(refresh, 2000);
 </script>
 </body>
 </html>

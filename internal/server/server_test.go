@@ -1,0 +1,498 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"lastgasp/internal/agent"
+	"lastgasp/internal/incident"
+	"lastgasp/internal/store"
+	"lastgasp/internal/wire"
+)
+
+var testKey = bytes.Repeat([]byte{1}, 32)
+
+func pkt(host string, boot byte, inst, seq uint64) *wire.Packet {
+	return &wire.Packet{Host: host, BootID: [16]byte{boot}, Instance: inst, Seq: seq, Kind: wire.KindHeartbeat}
+}
+
+func TestTrackerGapsLateAndDuplicates(t *testing.T) {
+	tr := NewTracker()
+	now := time.Now()
+	for _, seq := range []uint64{1, 2, 6, 4, 4, 2, 10} {
+		tr.Observe(pkt("h", 1, 1, seq), now)
+	}
+	s := tr.Snapshot()[0]
+	// Missing after all packets: 3, 5, 7-9. 4 arrived late; 4 and 2 were duplicates.
+	if s.Gaps != 6 || s.Recovered != 1 || s.Missing() != 5 || s.Duplicates != 2 || s.Received != 5 || s.MaxSeq != 10 {
+		t.Fatalf("got %+v", s)
+	}
+	want := []Range{{3, 3}, {5, 5}, {7, 9}}
+	if len(s.MissingSet) != 3 || s.MissingSet[0] != want[0] || s.MissingSet[1] != want[1] || s.MissingSet[2] != want[2] {
+		t.Fatalf("ranges %v", s.MissingSet)
+	}
+	// Recovering the middle of a range splits it.
+	tr.Observe(pkt("h", 1, 1, 8), now)
+	s = tr.Snapshot()[0]
+	if len(s.MissingSet) != 4 || s.MissingSet[2] != (Range{7, 7}) || s.MissingSet[3] != (Range{9, 9}) {
+		t.Fatalf("ranges %v", s.MissingSet)
+	}
+}
+
+func TestTrackerStreamsAreSeparate(t *testing.T) {
+	tr := NewTracker()
+	now := time.Now()
+	tr.Observe(pkt("h", 1, 1, 1), now)
+	tr.Observe(pkt("h", 1, 2, 1), now) // agent restarted
+	tr.Observe(pkt("h", 2, 3, 3), now) // new boot, first two packets lost
+	hosts := tr.Hosts(now, time.Minute)
+	if len(hosts) != 1 || hosts[0].Streams != 3 || hosts[0].Missing != 2 || hosts[0].Received != 3 || !hosts[0].Up {
+		t.Fatalf("got %+v", hosts)
+	}
+	if tr.Hosts(now.Add(time.Hour), time.Minute)[0].Up {
+		t.Fatal("host should be down after staleAfter")
+	}
+}
+
+func TestTrackerCapsRanges(t *testing.T) {
+	tr := NewTracker()
+	tr.maxRanges = 3
+	for seq := uint64(1); seq <= 20; seq += 2 {
+		tr.Observe(pkt("h", 1, 1, seq), time.Now())
+	}
+	s := tr.Snapshot()[0]
+	if len(s.MissingSet) != 3 || s.Missing() != 9 {
+		t.Fatalf("got %d ranges, missing %d", len(s.MissingSet), s.Missing())
+	}
+}
+
+func TestKeyring(t *testing.T) {
+	k, err := ParseKeyring(strings.NewReader("# comment\n\nnode-1 " + strings.Repeat("aa", 16) + "\n* " + strings.Repeat("bb", 16) + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.Lookup("node-1")[0] != 0xaa || k.Lookup("other")[0] != 0xbb {
+		t.Fatal("wrong key")
+	}
+	k, _ = ParseKeyring(strings.NewReader("node-1 " + strings.Repeat("aa", 16)))
+	if k.Lookup("other") != nil {
+		t.Fatal("host without key must be rejected when there is no default")
+	}
+	for _, bad := range []string{"", "node-1", "node-1 short", "a b c"} {
+		if _, err := ParseKeyring(strings.NewReader(bad)); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
+
+type env struct {
+	st      *store.Store
+	tr      *Tracker
+	in      *Ingestor
+	det     *incident.Detector
+	metrics *Metrics
+	reg     *prometheus.Registry
+	http    *httptest.Server
+	dbPath  string
+	cancel  context.CancelFunc
+	stopped chan struct{}
+}
+
+func newEnv(t *testing.T, dbPath string) *env {
+	t.Helper()
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTracker()
+	if err := LoadStreams(context.Background(), st, tr); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	keys, _ := ParseKeyring(strings.NewReader("* " + strings.Repeat("01", 32)))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := NewMetrics(reg, tr, time.Minute)
+	in := NewIngestor(st, tr, keys, m, log)
+	in.Detector = incident.NewDetector(st, incident.DefaultRules(), incident.Config{SilentAfter: time.Hour, CrashWait: 0, Context: 50},
+		incident.NewMetrics(reg), log)
+	ctx, cancel := context.WithCancel(context.Background())
+	e := &env{st: st, tr: tr, in: in, det: in.Detector, metrics: m, reg: reg, dbPath: dbPath, cancel: cancel, stopped: make(chan struct{})}
+	go func() { in.Run(ctx); close(e.stopped) }()
+	e.http = httptest.NewServer((&API{Store: st, Tracker: tr, StaleAfter: time.Minute, Gatherer: reg, Context: 50}).Handler())
+	t.Cleanup(e.stop)
+	return e
+}
+
+func (e *env) stop() {
+	e.cancel()
+	<-e.stopped
+	e.http.Close()
+	e.st.Close()
+}
+
+func (e *env) send(t *testing.T, p *wire.Packet) {
+	t.Helper()
+	b, err := wire.Encode(p, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.in.Handle(b)
+}
+
+func (e *env) waitRecords(t *testing.T, want int) []store.Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		recs, err := e.st.Query(context.Background(), store.Filter{MaxLevel: -1, Oldest: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recs) >= want || time.Now().After(deadline) {
+			if len(recs) != want {
+				t.Fatalf("got %d records, want %d", len(recs), want)
+			}
+			return recs
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (e *env) get(t *testing.T, path string) string {
+	t.Helper()
+	resp, err := http.Get(e.http.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("%s: %d %s", path, resp.StatusCode, b)
+	}
+	return string(b)
+}
+
+func kmsgPkt(boot byte, inst, seq, kseq uint64, ts uint64, msg string) *wire.Packet {
+	return &wire.Packet{Host: "node-1", BootID: [16]byte{boot}, Instance: inst, Seq: seq, Kind: wire.KindKmsg,
+		Record: wire.Record{Priority: 3, Seq: kseq, TsUsec: ts, Part: 1, Parts: 1, Msg: msg}}
+}
+
+func TestDedupAcrossRestartsAndPstore(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	// Boot A: two kernel lines, then the machine crashes.
+	e.send(t, kmsgPkt(0xa, 1, 1, 0, 100, "booting"))
+	e.send(t, kmsgPkt(0xa, 1, 2, 1, 200, "disk error"))
+	e.waitRecords(t, 2)
+	// The agent restarts in the same boot and replays the kernel buffer.
+	e.send(t, kmsgPkt(0xa, 2, 1, 0, 100, "booting"))
+	e.send(t, kmsgPkt(0xa, 2, 2, 1, 200, "disk error"))
+	e.send(t, kmsgPkt(0xa, 2, 3, 2, 300, "new line"))
+	e.waitRecords(t, 3)
+
+	// Boot B: pstore holds the tail of boot A, including a line that never made it out.
+	pstore := func(seq, line, ts uint64, msg string) *wire.Packet {
+		return &wire.Packet{Host: "node-1", BootID: [16]byte{0xb}, Instance: 3, Seq: seq, Kind: wire.KindPstore,
+			Record: wire.Record{Priority: 0, Seq: line, TsUsec: ts, FileID: 77, Part: 1, Parts: 1, Msg: msg}}
+	}
+	e.send(t, pstore(1, 0, 200, "disk error"))
+	e.send(t, pstore(2, 1, 300, "new line"))
+	e.send(t, pstore(3, 2, 400, "Kernel panic"))
+	recs := e.waitRecords(t, 4)
+	last := recs[3]
+	if last.Message != "Kernel panic" || last.Source != "pstore" || last.BootID != wire.FormatBootID([16]byte{0xa}) {
+		t.Fatalf("pstore record not attributed to boot A: %+v", last)
+	}
+	// pstore is not cleared, so the next boot sends the same file again.
+	e.send(t, pstore(1, 2, 400, "Kernel panic"))
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xc}, Instance: 4, Seq: 1, Kind: wire.KindPstore,
+		Record: wire.Record{Seq: 2, TsUsec: 400, FileID: 77, Part: 1, Parts: 1, Msg: "Kernel panic"}})
+	e.send(t, kmsgPkt(0xc, 4, 2, 0, 1, "marker"))
+	e.waitRecords(t, 5)
+
+	metrics := e.get(t, "/metrics")
+	for _, want := range []string{
+		`lastgasp_records_deduplicated_total{host="node-1",source="kmsg"} 2`,
+		`lastgasp_records_deduplicated_total{host="node-1",source="pstore"} 3`,
+		`lastgasp_packets_duplicate_total{host="node-1"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics missing %s", want)
+		}
+	}
+}
+
+func TestBadPacketsAreCounted(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	b, _ := wire.Encode(kmsgPkt(1, 1, 1, 0, 0, "x"), bytes.Repeat([]byte{2}, 32))
+	e.in.Handle(b)
+	e.in.Handle([]byte("garbage"))
+	m := e.get(t, "/metrics")
+	if !strings.Contains(m, `lastgasp_packets_invalid_total{reason="auth_failed"} 1`) ||
+		!strings.Contains(m, `lastgasp_packets_invalid_total{reason="malformed"} 1`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
+func TestGapsInAPIAndMetricsSurviveRestart(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "db")
+	e := newEnv(t, db)
+	for _, seq := range []uint64{1, 2, 5} {
+		e.send(t, kmsgPkt(1, 9, seq, seq, seq, "m"))
+	}
+	e.waitRecords(t, 3)
+
+	var streams []Stream
+	json.Unmarshal([]byte(e.get(t, "/api/streams")), &streams)
+	if len(streams) != 1 || streams[0].Missing() != 2 || streams[0].MissingSet[0] != (Range{3, 4}) {
+		t.Fatalf("streams %+v", streams)
+	}
+	var hosts []HostView
+	json.Unmarshal([]byte(e.get(t, "/api/hosts")), &hosts)
+	if len(hosts) != 1 || hosts[0].Missing != 2 || hosts[0].Boots != 1 {
+		t.Fatalf("hosts %+v", hosts)
+	}
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_packets_missing{host="node-1"} 2`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+	e.stop()
+
+	// After a server restart the state is loaded back and a late packet still counts as recovered.
+	e2 := newEnv(t, db)
+	e2.send(t, kmsgPkt(1, 9, 4, 4, 4, "late"))
+	e2.send(t, kmsgPkt(1, 9, 6, 6, 6, "next"))
+	e2.waitRecords(t, 5)
+	m := e2.get(t, "/metrics")
+	for _, want := range []string{`lastgasp_packets_missing{host="node-1"} 1`, `lastgasp_packets_late_total{host="node-1"} 1`} {
+		if !strings.Contains(m, want) {
+			t.Fatalf("metrics missing %s:\n%s", want, m)
+		}
+	}
+}
+
+func TestLogsAPIAndDownload(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	e.send(t, kmsgPkt(1, 1, 1, 1, 1, "first"))
+	p := kmsgPkt(1, 1, 2, 2, 2, "second")
+	p.Record.Priority = 6
+	e.send(t, p)
+	e.waitRecords(t, 2)
+
+	var recs []store.Record
+	json.Unmarshal([]byte(e.get(t, "/api/logs?level=3")), &recs)
+	if len(recs) != 1 || recs[0].Message != "first" || recs[0].Level != 3 {
+		t.Fatalf("got %+v", recs)
+	}
+	lines := strings.Split(strings.TrimSpace(e.get(t, "/api/download?host=node-1")), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"message":"first"`) {
+		t.Fatalf("download: %v", lines)
+	}
+	if !strings.Contains(e.get(t, "/"), "<title>lastgasp</title>") {
+		t.Fatal("ui not served")
+	}
+}
+
+// TestAgentToServerOverUDP runs a real agent sender and the UDP listener.
+func TestAgentToServerOverUDP(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go e.in.Listen(conn)
+	defer conn.Close()
+
+	res, err := agent.NewResolver([]string{conn.LocalAddr().String()}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := agent.NewQueue(100)
+	long := strings.Repeat("x", 3000)
+	for i, msg := range []string{"hello", long} {
+		parts := wire.SplitMessage(msg, wire.MaxMsg(len("node-1")))
+		for j, part := range parts {
+			q.Push(agent.Item{Kind: wire.KindKmsg, Rec: wire.Record{Priority: 4, Seq: uint64(i), Part: uint8(j + 1), Parts: uint8(len(parts)), Msg: part}})
+		}
+	}
+	s := &agent.Sender{Host: "node-1", Instance: 1, Key: testKey, Queue: q, Resolver: res,
+		Stats: &agent.Stats{}, Log: agent.NewLogger(io.Discard, 10), Heartbeat: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Run(ctx)
+	defer cancel()
+
+	recs := e.waitRecords(t, 4)
+	var joined string
+	for _, r := range recs[1:] {
+		joined += r.Message
+	}
+	if recs[0].Message != "hello" || joined != long || recs[1].Parts != 3 {
+		t.Fatalf("records %+v", recs)
+	}
+}
+
+func TestKeyFileReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys")
+	os.WriteFile(path, []byte("node-1 "+strings.Repeat("aa", 16)+"\n"), 0o600)
+	k, err := OpenKeyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.Lookup("node-2") != nil {
+		t.Fatal("node-2 should be unknown")
+	}
+	os.WriteFile(path, []byte("node-1 "+strings.Repeat("aa", 16)+"\nnode-2 "+strings.Repeat("bb", 16)+"\n"), 0o600)
+	if err := k.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if k.Lookup("node-2")[0] != 0xbb || k.Hosts() != 2 {
+		t.Fatal("reload did not add node-2")
+	}
+	// A broken file keeps the old keys.
+	os.WriteFile(path, []byte("garbage\n"), 0o600)
+	if err := k.Reload(); err == nil {
+		t.Fatal("broken file accepted")
+	}
+	if k.Lookup("node-2") == nil {
+		t.Fatal("old keys lost after a failed reload")
+	}
+}
+
+func TestRetention(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	e.send(t, kmsgPkt(1, 1, 1, 1, 1, "old"))
+	e.waitRecords(t, 1)
+	e.in.saveStreams(context.Background())
+	r := &Retention{Store: e.st, Tracker: e.tr, Detector: e.det, Metrics: e.metrics,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Age: time.Hour}
+	if err := r.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e.waitRecords(t, 1) // nothing is old yet
+	if err := r.RunOnce(context.Background(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	e.waitRecords(t, 0)
+	if len(e.tr.Snapshot()) != 0 {
+		t.Fatal("stream not pruned")
+	}
+	if saved, _ := e.st.LoadStreams(context.Background()); len(saved) != 0 {
+		t.Fatalf("saved streams left: %d", len(saved))
+	}
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_retention_deleted_total{table="records"} 1`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
+// TestCrashIncidentEndToEnd sends a boot that dies with a panic, then the next boot with pstore lines.
+func TestCrashIncidentEndToEnd(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	e.send(t, kmsgPkt(0xa, 1, 1, 0, 100, "booting"))
+	e.send(t, kmsgPkt(0xa, 1, 2, 1, 200, "Kernel panic - not syncing: Fatal exception"))
+	e.waitRecords(t, 2)
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xb}, Instance: 2, Seq: 1, Kind: wire.KindPstore,
+		Record: wire.Record{Seq: 0, TsUsec: 300, FileID: 5, Part: 1, Parts: 1, Msg: "---[ end Kernel panic ]---"}})
+	e.waitRecords(t, 3)
+	e.det.Tick(context.Background(), time.Now())
+
+	var list []struct {
+		ID   int64  `json:"id"`
+		Kind string `json:"kind"`
+		Rule string `json:"rule"`
+	}
+	json.Unmarshal([]byte(e.get(t, "/api/incidents")), &list)
+	if len(list) != 2 || list[0].Kind != "crash" || list[0].Rule != "panic" || list[1].Kind != "kernel_error" {
+		t.Fatalf("incidents %+v", list)
+	}
+	var v IncidentView
+	json.Unmarshal([]byte(e.get(t, "/api/incidents/"+strconv.FormatInt(list[0].ID, 10))), &v)
+	if len(v.Records) != 2 || v.Records[1].Message != "Kernel panic - not syncing: Fatal exception" || len(v.Pstore) != 1 {
+		t.Fatalf("view %+v", v)
+	}
+
+	ack := func(ct string) int {
+		req, _ := http.NewRequest("POST", e.http.URL+"/api/incidents/"+strconv.FormatInt(list[0].ID, 10)+"/ack", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", ct)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := ack("application/x-www-form-urlencoded"); code != http.StatusUnsupportedMediaType {
+		t.Fatalf("form ack got %d", code)
+	}
+	if code := ack("application/json"); code != 200 {
+		t.Fatalf("ack got %d", code)
+	}
+	if resp, _ := http.Get(e.http.URL + "/api/incidents/999"); resp.StatusCode != 404 {
+		t.Fatalf("unknown incident got %d", resp.StatusCode)
+	}
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_incidents_total{host="node-1",kind="crash"} 1`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
+func TestMetricsSurviveBadHostLabel(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	// Older data or a bug could still put a bad name in the tracker; a scrape must not crash.
+	e.tr.Observe(&wire.Packet{Host: "bad\xff", Seq: 1, Kind: wire.KindHeartbeat}, time.Now())
+	e.send(t, kmsgPkt(1, 1, 1, 1, 1, "x"))
+	e.waitRecords(t, 1)
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_packets_received_total{host="node-1"} 1`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
+func TestCleanText(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":            "plain",
+		"é ok":             "é ok",
+		"a\x00b":           `a\x00b`,
+		"bad\xff\xfe end":  `bad\xff\xfe end`,
+		"cut \xe2\x82 end": `cut \xe2\x82 end`,
+	} {
+		if got := cleanText(in); got != want {
+			t.Errorf("cleanText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBinaryPstoreLineIsStored(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{2}, Instance: 1, Seq: 1, Kind: wire.KindPstore,
+		Record: wire.Record{FileID: 1, Part: 1, Parts: 1, Msg: "garbage \x00\xff after crash"}})
+	if recs := e.waitRecords(t, 1); recs[0].Message != `garbage \x00\xff after crash` {
+		t.Fatalf("stored %q", recs[0].Message)
+	}
+}
+
+// TestBootsInOneBatchKeepTheirOrder sends a crash and the next boot so fast that they share one batch.
+func TestBootsInOneBatchKeepTheirOrder(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	fixed := time.Now()
+	e.in.now = func() time.Time { return fixed }
+	e.send(t, kmsgPkt(0xa, 1, 1, 0, 100, "Kernel panic - not syncing: x"))
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xb}, Instance: 2, Seq: 1, Kind: wire.KindPstore,
+		Record: wire.Record{FileID: 3, Part: 1, Parts: 1, Msg: "pstore line"}})
+	recs := e.waitRecords(t, 2)
+	if recs[1].BootID != wire.FormatBootID([16]byte{0xa}) {
+		t.Fatalf("pstore line given to boot %s", recs[1].BootID)
+	}
+	l, _ := e.st.Incidents(context.Background(), store.IncidentFilter{Kind: "reboot"})
+	if len(l) != 1 {
+		t.Fatalf("reboot not detected: %+v", l)
+	}
+}

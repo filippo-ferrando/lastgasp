@@ -1,0 +1,22 @@
+[Unit]
+Description=lastgasp kernel log agent
+# Start early, before most of the system, so boot messages are captured.
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+# Never stop restarting, however often the agent fails. This key belongs in [Unit].
+StartLimitIntervalSec=0
+
+[Service]
+# deploy/install-agent.sh replaces this line with a drop-in holding the real flags.
+ExecStart=/usr/local/sbin/lastgasp-agent -server logs.example.net:5140 -key-file /etc/lastgasp/agent.key
+Restart=always
+RestartSec=1
+# The agent is never the process chosen when memory runs out.
+OOMScoreAdjust=-1000
+LimitMEMLOCK=infinity
+Nice=-10
+
+[Install]
+WantedBy=sysinit.target

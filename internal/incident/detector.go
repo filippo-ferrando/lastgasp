@@ -1,0 +1,416 @@
+package incident
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"lastgasp/internal/store"
+)
+
+// Incident kinds.
+const (
+	KindCrash       = "crash"
+	KindReboot      = "reboot"
+	KindSilent      = "silent"
+	KindKernelError = "kernel_error"
+)
+
+var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError}
+
+// Config tunes the detector.
+type Config struct {
+	SilentAfter time.Duration // time without packets before a host counts as silent
+	CrashWait   time.Duration // time after a reboot to wait for pstore lines before deciding crash or reboot
+	Context     int           // number of log lines kept as context of an incident
+	// ResolveAfter closes a kernel error incident as resolved when no new line matched for this long, 0 never.
+	ResolveAfter time.Duration
+}
+
+// Metrics are the incident Prometheus metrics.
+type Metrics struct {
+	Created *prometheus.CounterVec
+	Open    *prometheus.GaugeVec
+	Alerts  *prometheus.CounterVec
+}
+
+func NewMetrics(reg prometheus.Registerer) *Metrics {
+	m := &Metrics{
+		Created: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lastgasp_incidents_total", Help: "Incidents found. A reboot that turns out to be a crash counts in both kinds.",
+		}, []string{"host", "kind"}),
+		Open: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "lastgasp_incidents_open", Help: "Incidents still going on.",
+		}, []string{"kind"}),
+		Alerts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lastgasp_alerts_total", Help: "Incident alerts by target and result (sent, resolved, failed, suppressed).",
+		}, []string{"target", "result"}),
+	}
+	reg.MustRegister(m.Created, m.Open, m.Alerts)
+	return m
+}
+
+// HostSeen is the last known state of a host, used to restore the detector after a server restart.
+type HostSeen struct {
+	Host   string
+	BootID string
+}
+
+type hostState struct {
+	boot     string
+	lastSeen time.Time
+}
+
+// Detector turns packets and stored records into incidents. It is safe for concurrent use.
+type Detector struct {
+	Store   *store.Store
+	Log     *slog.Logger
+	Metrics *Metrics
+	// Wake is called when an incident may need an alert.
+	Wake func()
+
+	cfg   Config
+	rules atomic.Pointer[Rules]
+	mu    sync.Mutex
+	hosts map[string]*hostState
+	open  map[string]*store.Incident
+	dirty map[int64]*store.Incident
+	// lastReboot is the newest reboot per host that was not found to be a crash. pstore lines
+	// that arrive after the crash check can still turn it into one.
+	lastReboot map[string]*store.Incident
+}
+
+func NewDetector(st *store.Store, rules *Rules, cfg Config, m *Metrics, log *slog.Logger) *Detector {
+	if cfg.Context <= 0 {
+		cfg.Context = 200
+	}
+	d := &Detector{Store: st, Log: log, Metrics: m, Wake: func() {}, cfg: cfg,
+		hosts: map[string]*hostState{}, open: map[string]*store.Incident{}, dirty: map[int64]*store.Incident{},
+		lastReboot: map[string]*store.Incident{}}
+	d.SetRules(rules)
+	return d
+}
+
+// SetRules replaces the rules, for example after a reload.
+func (d *Detector) SetRules(r *Rules) { d.rules.Store(r) }
+
+func openKey(host, boot, kind, rule string) string {
+	return host + "|" + boot + "|" + kind + "|" + rule
+}
+
+func keyOf(i *store.Incident) string { return openKey(i.Host, i.BootID, i.Kind, i.Rule) }
+
+// Load restores open incidents and known hosts. Hosts count as seen now, so a server
+// restart does not make every host look silent.
+func (d *Detector) Load(ctx context.Context, hosts []HostSeen, now time.Time) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, h := range hosts {
+		d.hosts[h.Host] = &hostState{boot: h.BootID, lastSeen: now}
+	}
+	open, err := d.Store.Incidents(ctx, store.IncidentFilter{OpenOnly: true, Limit: 1000})
+	if err != nil {
+		return err
+	}
+	for i := range open {
+		inc := open[i]
+		d.open[keyOf(&inc)] = &inc
+	}
+	recent, err := d.Store.Incidents(ctx, store.IncidentFilter{Limit: 1000})
+	if err != nil {
+		return err
+	}
+	done := map[string]bool{}
+	for i := range recent {
+		inc := recent[i]
+		if done[inc.Host] || (inc.Kind != KindReboot && inc.Kind != KindCrash) {
+			continue
+		}
+		done[inc.Host] = true
+		if inc.Kind == KindReboot && !inc.Open() {
+			d.lastReboot[inc.Host] = &inc
+		}
+	}
+	d.updateOpen()
+	return nil
+}
+
+// Seen notes a valid packet from host. It closes a silent incident when the host sends again.
+func (d *Detector) Seen(host, boot string, now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	h := d.hosts[host]
+	if h == nil {
+		h = &hostState{}
+		d.hosts[host] = h
+	}
+	h.boot, h.lastSeen = boot, now
+	key := openKey(host, boot, KindSilent, "")
+	if inc := d.open[key]; inc != nil {
+		inc.Summary += fmt.Sprintf(" (host sent again after %s)", now.Sub(inc.OpenedAt).Round(time.Second))
+		inc.Resolved = true
+		d.close(context.Background(), key, inc, now)
+		d.Wake()
+	}
+}
+
+// NewBoot is called once when a host starts a boot not seen before. prev is the boot before it, or "".
+func (d *Detector) NewBoot(ctx context.Context, host, boot, prev string, now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.hosts[host] = &hostState{boot: boot, lastSeen: now}
+	delete(d.lastReboot, host)
+	if prev == "" {
+		return
+	}
+	for key, inc := range d.open {
+		if inc.Host == host && inc.BootID == prev && inc.Kind != KindReboot {
+			d.close(ctx, key, inc, now)
+		}
+	}
+	last := d.lastRecord(ctx, host, prev)
+	inc := &store.Incident{Host: host, BootID: prev, Kind: KindReboot, Severity: store.SeverityInfo,
+		FirstRecordID: last.ID, LastRecordID: last.ID, Count: 1, OpenedAt: now, UpdatedAt: now,
+		Summary: "Rebooted into boot " + short(boot) + "." + lastLine(last)}
+	d.create(ctx, inc)
+	d.updateOpen()
+}
+
+// Records checks newly stored kmsg records against the rules.
+func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted []bool, now time.Time) {
+	rules := d.rules.Load()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	created := false
+	late := map[*store.Incident]bool{}
+	for i, r := range recs {
+		if !inserted[i] {
+			continue
+		}
+		if r.Source == "pstore" {
+			if lr := d.lastReboot[r.Host]; lr != nil && lr.BootID == r.BootID {
+				late[lr] = true
+			}
+			continue
+		}
+		if r.Source != "kmsg" {
+			continue
+		}
+		rule := rules.Match(r.Message)
+		if rule == nil {
+			continue
+		}
+		key := openKey(r.Host, r.BootID, KindKernelError, rule.Name)
+		if inc := d.open[key]; inc != nil {
+			inc.Count++
+			inc.LastRecordID, inc.UpdatedAt = r.ID, now
+			// Saved on the next tick, so a flood of errors does not cost one write each.
+			d.dirty[inc.ID] = inc
+			continue
+		}
+		d.create(ctx, &store.Incident{Host: r.Host, BootID: r.BootID, Kind: KindKernelError, Severity: rule.Severity,
+			Rule: rule.Name, FirstRecordID: r.ID, LastRecordID: r.ID, Count: 1, Summary: r.Message, OpenedAt: now, UpdatedAt: now})
+		created = true
+	}
+	for inc := range late {
+		d.decide(ctx, inc)
+		if inc.Kind != KindCrash {
+			continue
+		}
+		delete(d.lastReboot, inc.Host)
+		inc.UpdatedAt = now
+		if err := d.Store.UpdateIncident(ctx, inc); err != nil {
+			d.Log.Error("save incident", "err", err)
+		}
+		// A sent or skipped reboot alert does not cover a crash, so the alert starts over.
+		if err := d.Store.ResetAlerts(ctx, inc.ID); err != nil {
+			d.Log.Error("save incident", "err", err)
+		}
+		created = true
+	}
+	if created {
+		d.updateOpen()
+		d.Wake()
+	}
+}
+
+// Tick finds silent hosts, decides pending reboots and saves changed incidents.
+func (d *Detector) Tick(ctx context.Context, now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	wake := false
+	for host, h := range d.hosts {
+		if h.boot == "" || d.cfg.SilentAfter <= 0 || now.Sub(h.lastSeen) < d.cfg.SilentAfter {
+			continue
+		}
+		if d.open[openKey(host, h.boot, KindSilent, "")] != nil {
+			continue
+		}
+		last := d.lastRecord(ctx, host, h.boot)
+		d.create(ctx, &store.Incident{Host: host, BootID: h.boot, Kind: KindSilent, Severity: store.SeverityWarning,
+			FirstRecordID: last.ID, LastRecordID: last.ID, Count: 1, OpenedAt: now, UpdatedAt: now,
+			Summary: fmt.Sprintf("No packets for %s.", now.Sub(h.lastSeen).Round(time.Second)) + lastLine(last)})
+		wake = true
+	}
+	for key, inc := range d.open {
+		switch {
+		case inc.Kind == KindReboot && now.Sub(inc.OpenedAt) >= d.cfg.CrashWait:
+			d.decide(ctx, inc)
+			d.close(ctx, key, inc, now)
+			if inc.Kind == KindReboot {
+				d.lastReboot[inc.Host] = inc
+				// A clean reboot ends the problems of the old boot.
+				for _, k := range []string{KindKernelError, KindSilent} {
+					if err := d.Store.ResolveKind(ctx, inc.Host, inc.BootID, k); err != nil {
+						d.Log.Error("save incident", "err", err)
+					}
+				}
+			}
+			wake = true
+		case inc.Kind == KindKernelError && d.cfg.ResolveAfter > 0 && now.Sub(inc.UpdatedAt) >= d.cfg.ResolveAfter:
+			inc.Summary += fmt.Sprintf(" (no new matching line for %s)", now.Sub(inc.UpdatedAt).Round(time.Second))
+			inc.Resolved = true
+			d.close(ctx, key, inc, now)
+			wake = true
+		}
+	}
+	for id, inc := range d.dirty {
+		if err := d.Store.UpdateIncident(ctx, inc); err != nil {
+			d.Log.Error("save incident", "err", err)
+			continue
+		}
+		delete(d.dirty, id)
+	}
+	d.updateOpen()
+	if wake {
+		d.Wake()
+	}
+}
+
+// Forget drops hosts not seen since cutoff, so hosts removed by retention do not turn silent again.
+func (d *Detector) Forget(cutoff time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for host, h := range d.hosts {
+		if h.lastSeen.Before(cutoff) {
+			delete(d.hosts, host)
+		}
+	}
+}
+
+// Run calls Tick every second until ctx is done.
+func (d *Detector) Run(ctx context.Context) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			d.Tick(ctx, now)
+		}
+	}
+}
+
+// decide turns a reboot into a crash when the old boot left pstore lines or ended with a critical kernel line.
+func (d *Detector) decide(ctx context.Context, inc *store.Incident) {
+	rules := d.rules.Load()
+	pstore, err := d.Store.Query(ctx, store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "pstore", MaxLevel: -1, Oldest: true, Limit: 10000})
+	if err != nil {
+		d.Log.Error("crash check", "err", err)
+	}
+	var tail []store.Record
+	if inc.LastRecordID > 0 {
+		tail, err = d.Store.Query(ctx, store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "kmsg", MaxLevel: -1,
+			BeforeID: inc.LastRecordID + 1, Limit: d.cfg.Context})
+		if err != nil {
+			d.Log.Error("crash check", "err", err)
+		}
+	}
+	var hit *Rule
+	var line string
+	for i := range pstore {
+		if r := rules.Match(pstore[i].Message); r != nil && r.Severity == store.SeverityCritical {
+			hit, line = r, pstore[i].Message
+			break
+		}
+	}
+	// The tail is newest first; the oldest critical line is usually the cause.
+	for i := len(tail) - 1; i >= 0 && hit == nil; i-- {
+		if r := rules.Match(tail[i].Message); r != nil && r.Severity == store.SeverityCritical {
+			hit, line = r, tail[i].Message
+		}
+	}
+	if hit == nil && len(pstore) == 0 {
+		return
+	}
+	inc.Kind, inc.Severity, inc.Count = KindCrash, store.SeverityCritical, len(pstore)
+	switch {
+	case hit != nil:
+		inc.Rule, inc.Summary = hit.Name, line
+	default:
+		inc.Rule = "pstore"
+		inc.Summary = fmt.Sprintf("The kernel saved %d lines before the reboot. Last: %s", len(pstore), pstore[len(pstore)-1].Message)
+	}
+	d.Metrics.Created.WithLabelValues(inc.Host, KindCrash).Inc()
+	d.Log.Info("incident is a crash", "id", inc.ID, "host", inc.Host, "rule", inc.Rule, "summary", inc.Summary)
+}
+
+func (d *Detector) create(ctx context.Context, inc *store.Incident) {
+	if err := d.Store.CreateIncident(ctx, inc); err != nil {
+		d.Log.Error("save incident", "err", err)
+		return
+	}
+	d.open[keyOf(inc)] = inc
+	d.Metrics.Created.WithLabelValues(inc.Host, inc.Kind).Inc()
+	d.Log.Info("incident", "id", inc.ID, "host", inc.Host, "kind", inc.Kind, "severity", inc.Severity.String(), "summary", inc.Summary)
+}
+
+func (d *Detector) close(ctx context.Context, key string, inc *store.Incident, now time.Time) {
+	inc.ClosedAt, inc.UpdatedAt = now, now
+	delete(d.open, key)
+	delete(d.dirty, inc.ID)
+	if err := d.Store.UpdateIncident(ctx, inc); err != nil {
+		d.Log.Error("save incident", "err", err)
+	}
+}
+
+func (d *Detector) lastRecord(ctx context.Context, host, boot string) store.Record {
+	recs, err := d.Store.Query(ctx, store.Filter{Host: host, BootID: boot, MaxLevel: -1, Limit: 1})
+	if err != nil {
+		d.Log.Error("incident context", "err", err)
+	}
+	if len(recs) == 0 {
+		return store.Record{}
+	}
+	return recs[0]
+}
+
+func (d *Detector) updateOpen() {
+	n := map[string]int{}
+	for _, inc := range d.open {
+		n[inc.Kind]++
+	}
+	for _, k := range kinds {
+		d.Metrics.Open.WithLabelValues(k).Set(float64(n[k]))
+	}
+}
+
+func lastLine(r store.Record) string {
+	if r.ID == 0 {
+		return ""
+	}
+	return " Last line: " + r.Message
+}
+
+func short(boot string) string {
+	if len(boot) > 8 {
+		return boot[:8]
+	}
+	return boot
+}

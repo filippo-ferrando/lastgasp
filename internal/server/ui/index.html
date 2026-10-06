@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lastgasp</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+  --accent: #c2410c; --ok: #15803d; --bad: #b91c1c; --warn: #a16207;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --panel: #1e1e1c; --text: #e8e8e3; --muted: #9a9a93; --line: #33332f;
+    --accent: #fb923c; --ok: #4ade80; --bad: #f87171; --warn: #facc15; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 18px; letter-spacing: .02em; }
+header h1 span { color: var(--accent); }
+header .sub { color: var(--muted); font-size: 13px; }
+main { padding: 16px 20px; display: grid; gap: 16px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+section h2 { margin: 0; padding: 10px 14px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-weight: 600; font-size: 12px; color: var(--muted); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.up { background: var(--ok); } .down { background: var(--bad); }
+.bad { color: var(--bad); font-weight: 600; } .warn { color: var(--warn); font-weight: 600; }
+.muted { color: var(--muted); }
+.empty { padding: 14px; color: var(--muted); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); align-items: center; }
+select, input, button, a.btn { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--text); text-decoration: none; }
+button, a.btn { cursor: pointer; }
+label.live { display: flex; gap: 6px; align-items: center; }
+#logs { font-family: var(--mono); font-size: 12.5px; max-height: 60vh; overflow: auto; }
+#logs td { white-space: pre-wrap; word-break: break-word; vertical-align: top; }
+#logs td.meta { white-space: nowrap; color: var(--muted); }
+.lv0, .lv1, .lv2, .lv3 { color: var(--bad); } .lv4 { color: var(--warn); } .lv7 { color: var(--muted); }
+.tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); }
+.tag.pstore { border-color: var(--accent); color: var(--accent); }
+.ranges { font-family: var(--mono); font-size: 12px; white-space: normal; }
+.sev { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.sev-critical { color: var(--bad); } .sev-warning { color: var(--warn); } .sev-info { color: var(--muted); }
+td.summary { white-space: nowrap; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12px; }
+tr.closed td { opacity: .6; }
+dialog { width: min(1100px, 96vw); max-height: 90vh; padding: 0; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); color: var(--text); }
+dialog::backdrop { background: rgb(0 0 0 / .4); }
+dialog .head { display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+dialog .head h3 { margin: 0; font-size: 15px; flex: 1; }
+dialog .body { padding: 0 14px 14px; overflow: auto; max-height: calc(90vh - 60px); }
+dialog h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+dialog pre { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 45vh; overflow: auto; }
+pre .ln { display: block; }
+pre .hit { background: color-mix(in srgb, var(--bad) 22%, transparent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>last<span>gasp</span></h1>
+  <div class="sub" id="status">loading</div>
+  <div class="sub" id="who" style="margin-left:auto"></div>
+</header>
+<main>
+  <section>
+    <h2>Incidents <label class="live"><input type="checkbox" id="inc-open"> open only</label></h2>
+    <div class="scroll" id="incidents"></div>
+  </section>
+
+  <section>
+    <h2>Hosts <span id="hostcount"></span></h2>
+    <div class="scroll"><table id="hosts"></table></div>
+  </section>
+
+  <section>
+    <h2>Missing packets <span class="muted" id="gapnote"></span></h2>
+    <div class="scroll" id="gaps"></div>
+  </section>
+
+  <section>
+    <h2>Logs <span id="logcount"></span></h2>
+    <div class="filters">
+      <select id="f-host"><option value="">all hosts</option></select>
+      <select id="f-level">
+        <option value="">all levels</option>
+        <option value="0">emerg</option><option value="1">alert and above</option>
+        <option value="2">crit and above</option><option value="3">err and above</option>
+        <option value="4">warning and above</option><option value="5">notice and above</option>
+        <option value="6">info and above</option>
+      </select>
+      <select id="f-source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option></select>
+      <input id="f-q" type="search" placeholder="search text">
+      <label class="live"><input type="checkbox" id="f-live" checked> live</label>
+      <button id="more">older</button>
+      <a class="btn" id="download" href="/api/download">download</a>
+    </div>
+    <div id="logs"><table><tbody id="logrows"></tbody></table></div>
+  </section>
+</main>
+<dialog id="inc-dialog">
+  <div class="head"><h3 id="inc-title"></h3><button id="inc-ack">acknowledge</button><button id="inc-close">close</button></div>
+  <div class="body" id="inc-body"></div>
+</dialog>
+<script>
+const LEVELS = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const fmtNum = n => Number(n).toLocaleString();
+const ago = t => {
+  const s = Math.max(0, (Date.now() - new Date(t)) / 1000);
+  if (s < 60) return Math.round(s) + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+};
+const tsFmt = us => (us / 1e6).toFixed(6).padStart(13, " ");
+
+let newestId = 0, oldestId = 0;
+
+function filterQuery() {
+  const p = new URLSearchParams();
+  for (const [k, id] of [["host", "f-host"], ["level", "f-level"], ["source", "f-source"], ["q", "f-q"]]) {
+    if ($(id).value) p.set(k, $(id).value);
+  }
+  return p;
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + ": " + r.status);
+  return r.json();
+}
+
+async function loadHosts() {
+  const hosts = await getJSON("/api/hosts");
+  $("hostcount").textContent = hosts.length ? hosts.filter(h => h.up).length + " of " + hosts.length + " up" : "";
+  const sel = $("f-host");
+  for (const h of hosts) {
+    if (![...sel.options].some(o => o.value === h.host)) sel.add(new Option(h.host, h.host));
+  }
+  if (!hosts.length) { $("hosts").innerHTML = '<tr><td class="empty">No agent has sent anything yet.</td></tr>'; return; }
+  const cls = (v, c) => v > 0 ? ` class="num ${c}"` : ' class="num"';
+  $("hosts").innerHTML = `<tr><th>Host</th><th>Last seen</th><th>Boots</th><th class="num">Received</th>
+    <th class="num" title="Packets that never arrived">Missing</th><th class="num" title="Packets that arrived out of order">Late</th>
+    <th class="num">Duplicates</th><th class="num" title="Dropped by the agent because its buffer was full">Agent drops</th>
+    <th class="num" title="Kernel overwrote records before the agent read them">Kernel overruns</th>
+    <th class="num">Send errors</th><th class="num">Buffered</th></tr>` +
+    hosts.map(h => `<tr class="click${$("f-host").value === h.host ? " sel" : ""}" data-host="${esc(h.host)}">
+      <td><span class="dot ${h.up ? "up" : "down"}"></span>${esc(h.host)}</td>
+      <td class="muted" title="${esc(h.last_seen)}">${ago(h.last_seen)}</td>
+      <td class="num">${h.boots}</td>
+      <td class="num">${fmtNum(h.received)}</td>
+      <td${cls(h.missing, "bad")}>${fmtNum(h.missing)}</td>
+      <td class="num">${fmtNum(h.recovered)}</td>
+      <td class="num">${fmtNum(h.duplicates)}</td>
+      <td${cls(h.agent.BufferDrops, "bad")}>${fmtNum(h.agent.BufferDrops)}</td>
+      <td${cls(h.agent.KmsgOverruns, "warn")}>${fmtNum(h.agent.KmsgOverruns)}</td>
+      <td${cls(h.agent.SendErrors, "warn")}>${fmtNum(h.agent.SendErrors)}</td>
+      <td class="num">${fmtNum(h.agent.Buffered)}</td></tr>`).join("");
+  for (const tr of $("hosts").querySelectorAll("tr.click")) {
+    tr.onclick = () => { $("f-host").value = $("f-host").value === tr.dataset.host ? "" : tr.dataset.host; reloadLogs(); refresh(); };
+  }
+}
+
+async function loadGaps() {
+  const host = $("f-host").value;
+  const streams = await getJSON("/api/streams" + (host ? "?host=" + encodeURIComponent(host) : ""));
+  $("gapnote").textContent = host ? host : "";
+  if (!streams.length) { $("gaps").innerHTML = '<div class="empty">No missing packets.</div>'; return; }
+  const show = rs => {
+    const parts = rs.slice(-20).map(r => r.from === r.to ? r.from : r.from + "-" + r.to);
+    return (rs.length > 20 ? "... " : "") + parts.join(", ");
+  };
+  $("gaps").innerHTML = `<table><tr><th>Host</th><th>Boot</th><th>Agent run</th><th>Last seen</th>
+    <th class="num">Missing</th><th class="num">Highest seq</th><th>Missing sequence numbers</th></tr>` +
+    streams.map(s => `<tr><td>${esc(s.host)}</td><td class="muted">${esc(s.boot_id.slice(0, 8))}</td>
+      <td class="muted">${esc(s.instance)}</td><td class="muted">${ago(s.last_seen)}</td>
+      <td class="num bad">${fmtNum(s.gaps - s.recovered)}</td><td class="num">${fmtNum(s.max_seq)}</td>
+      <td class="ranges">${esc(show(s.missing_ranges))}</td></tr>`).join("") + "</table>";
+}
+
+function logRow(r) {
+  const part = r.parts > 1 ? ` <span class="tag">part ${r.part}/${r.parts}</span>` : "";
+  const src = r.source === "pstore" ? ' <span class="tag pstore" title="Saved by the kernel before a crash or reboot">pstore</span>' : "";
+  return `<tr><td class="meta">${esc(r.host)}</td><td class="meta" title="boot ${esc(r.boot_id)}">[${tsFmt(r.ts_usec)}]</td>
+    <td class="meta lv${r.level}">${LEVELS[r.level]}</td><td class="lv${r.level}">${esc(r.message)}${part}${src}</td></tr>`;
+}
+
+async function reloadLogs() {
+  const recs = await getJSON("/api/logs?" + filterQuery() + "&limit=300");
+  $("logrows").innerHTML = recs.slice().reverse().map(logRow).join("");
+  newestId = recs.length ? recs[0].id : 0;
+  oldestId = recs.length ? recs[recs.length - 1].id : 0;
+  $("download").href = "/api/download?" + filterQuery();
+  $("logs").scrollTop = $("logs").scrollHeight;
+  updateCount();
+}
+
+async function pollLogs() {
+  const p = filterQuery();
+  p.set("after_id", newestId);
+  const recs = await getJSON("/api/logs?" + p);
+  if (!recs.length) return;
+  const box = $("logs");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  $("logrows").insertAdjacentHTML("beforeend", recs.map(logRow).join(""));
+  newestId = recs[recs.length - 1].id;
+  if (!oldestId) oldestId = recs[0].id;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+  updateCount();
+}
+
+async function loadOlder() {
+  if (!oldestId) return;
+  const p = filterQuery();
+  p.set("before_id", oldestId);
+  p.set("limit", 300);
+  const recs = await getJSON("/api/logs?" + p);
+  if (!recs.length) return;
+  const box = $("logs"), h = box.scrollHeight;
+  $("logrows").insertAdjacentHTML("afterbegin", recs.slice().reverse().map(logRow).join(""));
+  oldestId = recs[recs.length - 1].id;
+  box.scrollTop += box.scrollHeight - h;
+  updateCount();
+}
+
+function updateCount() { $("logcount").textContent = fmtNum($("logrows").rows.length) + " shown"; }
+
+const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error"};
+
+async function loadIncidents() {
+  const p = new URLSearchParams({limit: 50});
+  if ($("f-host").value) p.set("host", $("f-host").value);
+  if ($("inc-open").checked) p.set("open", "1");
+  const list = await getJSON("/api/incidents?" + p);
+  if (!list.length) { $("incidents").innerHTML = '<div class="empty">No incidents.</div>'; return; }
+  $("incidents").innerHTML = `<table><tr><th>Severity</th><th>Opened</th><th>Host</th><th>Kind</th>
+    <th class="num">Count</th><th>State</th><th>Summary</th></tr>` +
+    list.map(i => `<tr class="click${i.closed_at ? " closed" : ""}" data-id="${i.id}">
+      <td class="sev sev-${esc(i.severity)}">${esc(i.severity)}</td>
+      <td class="muted" title="${esc(i.opened_at)}">${ago(i.opened_at)}</td>
+      <td>${esc(i.host)}</td><td>${esc(KINDS[i.kind] || i.kind)}${i.rule ? ` <span class="tag">${esc(i.rule)}</span>` : ""}</td>
+      <td class="num">${fmtNum(i.count)}</td>
+      <td class="muted">${state(i)}</td>
+      <td class="summary" title="${esc(i.summary)}">${esc(i.summary)}</td></tr>`).join("") + "</table>";
+  for (const tr of $("incidents").querySelectorAll("tr.click")) tr.onclick = () => { location.hash = "incident=" + tr.dataset.id; };
+}
+
+let shownIncident = 0, isAdmin = true;
+
+// state describes an incident: open or closed, resolved, seen, and the alert state per target.
+const state = i => [i.closed_at ? (i.resolved ? "resolved" : "closed") : "open", i.acked_at ? "seen" : "",
+  ...(i.alerts || []).map(a => a.target + " " + a.state)].filter(Boolean).map(esc).join(", ");
+
+async function loadMe() {
+  const me = await getJSON("/api/me");
+  isAdmin = me.role === "admin";
+  $("who").textContent = me.auth ? me.user + " (" + me.role + ")" : "";
+}
+
+async function showIncident(id) {
+  const v = await getJSON("/api/incidents/" + id);
+  const i = v.incident;
+  shownIncident = i.id;
+  $("inc-title").innerHTML = `<span class="sev sev-${esc(i.severity)}">${esc(i.severity)}</span>
+    ${esc(i.host)}: ${esc(KINDS[i.kind] || i.kind)}${i.rule ? " (" + esc(i.rule) + ")" : ""}`;
+  $("inc-ack").disabled = !!i.acked_at;
+  $("inc-ack").hidden = !isAdmin;
+  const line = r => `<span class="ln${r.message === i.summary || r.id === i.last_record_id && i.kind === "kernel_error" ? " hit" : ""}">` +
+    `[${tsFmt(r.ts_usec)}] ${esc(LEVELS[r.level] || "")} ${esc(r.message)}</span>`;
+  const block = rs => rs.map(line).join("");
+  $("inc-body").innerHTML = `<h4>Summary</h4><pre>${esc(i.summary)}</pre>
+    <h4>Details</h4><div class="muted">boot ${esc(i.boot_id)}, opened ${esc(new Date(i.opened_at).toLocaleString())}${i.closed_at ?
+      ", closed " + esc(new Date(i.closed_at).toLocaleString()) : ", still open"}, count ${fmtNum(i.count)}<br>${state(i)}</div>` +
+    (v.pstore.length ? `<h4>Saved by the kernel before the reboot (pstore, ${fmtNum(v.pstore.length)} lines)</h4><pre>${block(v.pstore)}</pre>` : "") +
+    `<h4>Last kernel lines received (${fmtNum(v.records.length)})</h4>` +
+    (v.records.length ? `<pre id="inc-tail">${block(v.records)}</pre>` : '<div class="empty">No lines received for this boot.</div>');
+  if (!$("inc-dialog").open) $("inc-dialog").showModal();
+  const tail = $("inc-tail");
+  if (tail) tail.scrollTop = tail.scrollHeight;
+}
+
+function route() {
+  const m = location.hash.match(/^#incident=(\d+)$/);
+  if (m) showIncident(m[1]).catch(e => { $("status").textContent = e.message; });
+  else if ($("inc-dialog").open) $("inc-dialog").close();
+}
+
+$("inc-close").onclick = () => { history.replaceState(null, "", location.pathname + location.search); $("inc-dialog").close(); };
+$("inc-dialog").onclose = () => { if (location.hash) history.replaceState(null, "", location.pathname + location.search); };
+$("inc-ack").onclick = async () => {
+  await fetch("/api/incidents/" + shownIncident + "/ack", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+  $("inc-ack").disabled = true;
+  loadIncidents();
+};
+$("inc-open").onchange = loadIncidents;
+window.onhashchange = route;
+
+async function refresh() {
+  try {
+    await Promise.all([loadIncidents(), loadHosts(), loadGaps(), $("f-live").checked ? pollLogs() : null]);
+    $("status").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("status").textContent = "server not reachable: " + e.message;
+  }
+}
+
+for (const id of ["f-host", "f-level", "f-source"]) $(id).onchange = () => { reloadLogs(); refresh(); };
+let typing;
+$("f-q").oninput = () => { clearTimeout(typing); typing = setTimeout(reloadLogs, 300); };
+$("more").onclick = loadOlder;
+
+loadMe().catch(() => {});
+reloadLogs().then(refresh);
+route();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

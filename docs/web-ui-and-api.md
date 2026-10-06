@@ -4,16 +4,24 @@ The server serves a web UI at `/`, a JSON API under `/api/`, Prometheus metrics 
 
 ## Web UI
 
-The page refreshes every 2 seconds.
+The page refreshes every 2 seconds, and stops while its browser tab is hidden. A table is only redrawn when its data changes, and not while text in it is selected, so lines can be copied.
 
 | Section | Shows |
 | --- | --- |
 | Incidents | the newest 50 incidents with severity, host, kind, count, alert state and summary. A click opens the incident with its kernel lines and pstore lines, the matching line marked. "open only" hides closed ones |
-| Hosts | up or down, last packet, boots seen, packets received, missing, late, duplicates, agent drops, kernel overruns, send errors and records waiting in the agent. A click filters everything by that host |
+| Hosts | up or down, last packet, boots seen, packets received, missing, late, duplicates, agent drops, kernel overruns, send errors and records waiting in the agent. A click filters everything by that host, a second click removes the filter |
 | Missing packets | agent runs with missing packets and the missing sequence ranges |
-| Logs | live kernel lines, filtered by host, level, source and text. "older" loads more, "download" saves all matching lines as NDJSON |
+| Logs | live kernel lines, filtered by host, level, source and text. A click on the host of a line filters by that host. "live" off stops new lines. "older" loads 300 more and says when there are none. "download" saves all matching lines as NDJSON. When new lines arrive while the view is scrolled up, a button jumps to them |
 
-An incident has its own link: `https://lastgasp.example.net/#incident=42`. Alerts use these links when `-public-url` is set.
+The incident window has buttons to copy its link, show the logs of its host, and acknowledge it (admins only). It closes with Escape, the close button or a click outside.
+
+Filters are part of the address (`/?host=db-01&level=3`), so a filtered view can be shared or bookmarked. An incident has its own link: `https://lastgasp.example.net/#incident=42`. Alerts use these links when `-public-url` is set.
+
+| Key | Does |
+| --- | --- |
+| `/` | jump to the search box |
+| Escape | in the search box, clear it. In the incident window, close it |
+| Tab, then Enter or Space | open an incident or filter by a host from the keyboard |
 
 ## Login
 

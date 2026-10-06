@@ -246,6 +246,34 @@ func TestBadPacketsAreCounted(t *testing.T) {
 	}
 }
 
+func TestHeartbeatsGetAcksAndProbesAreNotCounted(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	handle := func(p *wire.Packet) []byte {
+		b, err := wire.Encode(p, testKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e.in.Handle(b)
+	}
+	probe := pkt("node-1", 1, 1, 0)
+	ack := handle(probe)
+	if seq, err := wire.DecodeAck(ack, testKey, "node-1", probe.BootID, 1); err != nil || seq != 0 {
+		t.Fatalf("probe ack seq %d err %v", seq, err)
+	}
+	if handle(kmsgPkt(1, 1, 1, 1, 1, "m")) != nil {
+		t.Fatal("record packet got an ack")
+	}
+	if ack := handle(pkt("node-1", 1, 1, 2)); ack == nil {
+		t.Fatal("heartbeat got no ack")
+	}
+	e.waitRecords(t, 1)
+	time.Sleep(50 * time.Millisecond)
+	s := e.tr.Snapshot()
+	if len(s) != 1 || s[0].Received != 2 || s[0].Duplicates != 0 || s[0].Missing() != 0 {
+		t.Fatalf("streams %+v", s)
+	}
+}
+
 func TestGapsInAPIAndMetricsSurviveRestart(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "db")
 	e := newEnv(t, db)
@@ -327,7 +355,7 @@ func TestAgentToServerOverUDP(t *testing.T) {
 		}
 	}
 	s := &agent.Sender{Host: "node-1", Instance: 1, Key: testKey, Queue: q, Resolver: res,
-		Stats: &agent.Stats{}, Log: agent.NewLogger(io.Discard, 10), Heartbeat: time.Hour}
+		Stats: &agent.Stats{}, Log: agent.NewLogger(io.Discard, 10), Heartbeat: time.Hour, WaitAck: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	go s.Run(ctx)
 	defer cancel()

@@ -19,6 +19,7 @@ The server stores logs per machine, removes duplicates, finds missing packets, t
 | Internal bug | Each worker restarts after a panic. systemd restarts the process. |
 | Crash and reboot | On start, the agent reads `/sys/fs/pstore` (logs the kernel saved before the crash) and sends them first, from a queue of their own sized to hold every line, so a full buffer never drops them. It also replays the whole kernel buffer. The server removes what it already has. |
 | One server down | Several servers can be given with `-server a:5140,b:5140`. Every packet goes to all of them. |
+| No server listening yet | The server answers each heartbeat with an encrypted ack. Until a server answers, the agent keeps its records in the buffer and only sends a probe every second. Records go out once a server answers, so a server that starts later or gets the host key later still receives the boot log and the pstore lines. When no ack comes for three heartbeats, the agent holds records again. |
 
 ## How the server handles bad input
 
@@ -35,6 +36,8 @@ Only the host name, boot ID, agent instance ID and a nonce counter are sent in c
 This is wire version 2. Version 1 packets (HMAC only, no encryption) are rejected and counted as `version`, so agents and server must be upgraded together.
 
 Every packet has a sequence number that starts at 1 for each agent run (host, boot ID, random instance ID). The sequence number is only used when a send succeeds, so local network errors do not look like losses. A heartbeat every 5 seconds carries the agent's counters and also reveals losses at the end of a burst.
+
+The server answers every heartbeat with an ack, sent from the listen port back to the address the heartbeat came from. Acks use a key derived with a different HKDF label, so server and agent nonces never meet. A probe is a heartbeat with sequence number 0: it gets an ack but is not counted, so probes sent while no server listens do not show up as missing. Firewalls must let these UDP replies back to the agent (stateful firewalls do by default). Agents started with `-wait-ack=false` do not wait for acks and send right away.
 
 ## Missing packets
 
@@ -185,6 +188,7 @@ The flags are kept in a systemd drop-in instead of an environment file. systemd 
 | `-buffer` | 16384 | records kept in memory. pstore lines have their own queue on top of this |
 | `-rate` | 2000 | max packets per second |
 | `-heartbeat` | 5s | heartbeat interval |
+| `-wait-ack` | true | hold records until a server answers a heartbeat. Needs `-heartbeat` above 0. Set to false when server replies cannot reach the agent |
 | `-resolve-every` | 1m | DNS refresh interval |
 | `-pstore` | /sys/fs/pstore | empty to disable |
 | `-mlock` | true | lock memory |

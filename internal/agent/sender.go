@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"lastgasp/internal/wire"
@@ -11,6 +12,7 @@ import (
 
 type packetConn interface {
 	WriteTo(b []byte, addr net.Addr) (int, error)
+	ReadFrom(b []byte) (int, net.Addr, error)
 	Close() error
 }
 
@@ -27,6 +29,8 @@ type Sender struct {
 	Log       *Logger
 	Rate      int           // max packets per second, 0 means no limit
 	Heartbeat time.Duration // interval between heartbeats
+	// WaitAck holds records until a server answers a heartbeat, so nothing is sent while no server listens.
+	WaitAck bool
 
 	newConn func() (packetConn, error)
 	conn    packetConn
@@ -34,6 +38,9 @@ type Sender struct {
 	seq     uint64
 	start   time.Time
 	pace    pacer
+	lastAck atomic.Int64 // unix nanoseconds of the newest valid ack
+	acked   chan struct{}
+	state   string // "", "holding" or "sending", to log only changes
 }
 
 var errNoAddr = errors.New("no server address known yet")
@@ -53,7 +60,57 @@ func (s *Sender) init() error {
 	if s.Rate > 0 {
 		s.pace.interval = time.Second / time.Duration(s.Rate)
 	}
+	s.acked = make(chan struct{}, 1)
 	return nil
+}
+
+// ready reports whether records may be sent: acks are not used, or one arrived within three heartbeats.
+func (s *Sender) ready() bool {
+	if !s.WaitAck || s.Heartbeat <= 0 {
+		return true
+	}
+	last := s.lastAck.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < 3*s.Heartbeat
+}
+
+func (s *Sender) logState(ready bool) {
+	if !s.WaitAck || s.Heartbeat <= 0 {
+		return
+	}
+	switch {
+	case ready && s.state != "sending":
+		s.Log.Printf("send: a server answered, sending %d buffered records", s.buffered())
+		s.state = "sending"
+	case !ready && s.state == "":
+		s.Log.Printf("send: waiting for a server to answer before sending records")
+		s.state = "holding"
+	case !ready && s.state == "sending":
+		s.Log.Printf("send: no answer from any server for %s, holding records", 3*s.Heartbeat)
+		s.state = "holding"
+	}
+}
+
+// readAcks reads server answers until c is closed.
+func (s *Sender) readAcks(c packetConn) {
+	buf := make([]byte, wire.MaxPacket)
+	for {
+		n, _, err := c.ReadFrom(buf)
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if _, err := wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance); err != nil {
+			continue
+		}
+		s.lastAck.Store(time.Now().UnixNano())
+		select {
+		case s.acked <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // Run sends until ctx is done. A record leaves the queue only after at least one server accepted it.
@@ -67,10 +124,23 @@ func (s *Sender) Run(ctx context.Context) {
 	retry := newBackoff(50*time.Millisecond, 2*time.Second)
 	nextBeat := time.Now()
 	for ctx.Err() == nil {
+		ready := s.ready()
+		s.logState(ready)
 		if s.Heartbeat > 0 && !time.Now().Before(nextBeat) {
 			// A failed heartbeat is not retried: the next one carries newer counters.
-			s.send(&wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start))})
-			nextBeat = time.Now().Add(s.Heartbeat)
+			beat := &wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start))}
+			if ready {
+				s.send(beat)
+				nextBeat = time.Now().Add(s.Heartbeat)
+			} else {
+				// A probe has seq 0, so probes nobody received do not count as missing packets.
+				s.write(beat)
+				nextBeat = time.Now().Add(min(time.Second, s.Heartbeat))
+			}
+		}
+		if !ready {
+			s.wait(ctx, time.Until(nextBeat), false)
+			continue
 		}
 		q := s.Queue
 		it, ok := Item{}, false
@@ -83,7 +153,7 @@ func (s *Sender) Run(ctx context.Context) {
 			it, ok = q.Peek()
 		}
 		if !ok {
-			s.wait(ctx, time.Until(nextBeat))
+			s.wait(ctx, time.Until(nextBeat), true)
 			continue
 		}
 		err := s.send(&wire.Packet{Kind: it.Kind, Record: it.Rec})
@@ -114,15 +184,21 @@ func (s *Sender) buffered() int {
 	return n
 }
 
-func (s *Sender) wait(ctx context.Context, d time.Duration) {
+// wait sleeps for d, or until an ack arrives, or until a record is queued when queue is true.
+func (s *Sender) wait(ctx context.Context, d time.Duration, queue bool) {
 	if s.Heartbeat <= 0 {
 		d = time.Minute
 	}
 	t := time.NewTimer(max(d, time.Millisecond))
 	defer t.Stop()
+	var pushed <-chan struct{}
+	if queue {
+		pushed = s.Queue.Ready()
+	}
 	select {
 	case <-ctx.Done():
-	case <-s.Queue.Ready():
+	case <-pushed:
+	case <-s.acked:
 	case <-t.C:
 	}
 }
@@ -131,6 +207,15 @@ func (s *Sender) wait(ctx context.Context, d time.Duration) {
 // so local network errors do not show up as lost packets on the server.
 func (s *Sender) send(p *wire.Packet) error {
 	p.Seq = s.seq + 1
+	if err := s.write(p); err != nil {
+		return err
+	}
+	s.seq = p.Seq
+	return nil
+}
+
+// write seals p and sends it to every server. It succeeds if at least one write worked.
+func (s *Sender) write(p *wire.Packet) error {
 	p.SentAt = time.Now().UnixNano()
 	b, err := s.sealer.Seal(p)
 	if err != nil {
@@ -148,6 +233,9 @@ func (s *Sender) send(p *wire.Packet) error {
 			return err
 		}
 		s.conn = c
+		if s.WaitAck {
+			go s.readAcks(c)
+		}
 	}
 	sent := false
 	var lastErr error
@@ -165,7 +253,6 @@ func (s *Sender) send(p *wire.Packet) error {
 		s.conn = nil
 		return lastErr
 	}
-	s.seq = p.Seq
 	return nil
 }
 

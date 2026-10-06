@@ -43,7 +43,8 @@ func NewIngestor(st *store.Store, tr *Tracker, keys KeyLookup, m *Metrics, log *
 }
 
 // Handle checks one datagram and queues it. It never blocks; a full queue drops the packet.
-func (in *Ingestor) Handle(b []byte) {
+// It returns the ack to send back for a heartbeat, or nil.
+func (in *Ingestor) Handle(b []byte) []byte {
 	p, err := wire.Decode(b, in.Keys.Lookup)
 	if err != nil {
 		reason := "malformed"
@@ -58,20 +59,36 @@ func (in *Ingestor) Handle(b []byte) {
 			reason = "bad_host"
 		}
 		in.Metrics.Invalid.WithLabelValues(reason).Inc()
-		return
+		return nil
 	}
-	select {
-	case in.ch <- p:
-	default:
-		in.Metrics.QueueDropped.Inc()
+	// Seq 0 is a probe: the agent asks if a server is there, before it sends its records.
+	if p.Kind != wire.KindHeartbeat || p.Seq != 0 {
+		select {
+		case in.ch <- p:
+		default:
+			in.Metrics.QueueDropped.Inc()
+			return nil
+		}
 	}
+	if p.Kind != wire.KindHeartbeat {
+		return nil
+	}
+	key := in.Keys.Lookup(p.Host)
+	if key == nil {
+		return nil
+	}
+	ack, err := wire.EncodeAck(p, key)
+	if err != nil {
+		return nil
+	}
+	return ack
 }
 
 // Listen reads datagrams from conn until it is closed.
 func (in *Ingestor) Listen(conn net.PacketConn) error {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := conn.ReadFrom(buf)
+		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
@@ -79,7 +96,10 @@ func (in *Ingestor) Listen(conn net.PacketConn) error {
 			in.Log.Warn("udp read", "err", err)
 			continue
 		}
-		in.Handle(buf[:n])
+		if ack := in.Handle(buf[:n]); ack != nil {
+			// A lost ack is fine: the agent sends the next heartbeat soon.
+			conn.WriteTo(ack, addr)
+		}
 	}
 }
 

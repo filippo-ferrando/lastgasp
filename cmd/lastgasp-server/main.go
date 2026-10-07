@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,25 +26,29 @@ import (
 	"lastgasp/internal/incident"
 	"lastgasp/internal/server"
 	"lastgasp/internal/store"
+	"lastgasp/internal/version"
 	"lastgasp/internal/wire"
 )
 
 func main() {
 	var (
-		listen   = flag.String("listen", ":5140", "UDP address for agent packets")
-		httpAddr = flag.String("http", ":8080", "HTTP address for the web UI, API and /metrics")
-		dsn      = flag.String("db", "lastgasp.db", "SQLite file, or a postgres:// URL")
-		keyFile  = flag.String("key-file", "", "file with \"host hexkey\" lines, \"*\" matches any host (required)")
-		stale    = flag.Duration("stale-after", 30*time.Second, "time without packets before a host is shown as down")
-		rcvBuf   = flag.Int("rcvbuf", 8<<20, "UDP receive buffer in bytes")
-		retain   = flag.Duration("retain", 0, "delete records, closed incidents and agent runs older than this, 0 keeps everything")
+		listen     = flag.String("listen", ":5140", "UDP address for agent packets")
+		httpAddr   = flag.String("http", ":8080", "HTTP address for the web UI, API and /metrics")
+		dsn        = flag.String("db", "lastgasp.db", "SQLite file, or a postgres:// URL")
+		keyFile    = flag.String("key-file", "", "file with \"host hexkey\" lines, \"*\" matches any host, optional when agents enroll")
+		stale      = flag.Duration("stale-after", 30*time.Second, "time without packets before a host is shown as down")
+		rcvBuf     = flag.Int("rcvbuf", 8<<20, "UDP receive buffer in bytes")
+		retain     = flag.Duration("retain", 0, "delete records, closed incidents and agent runs older than this, 0 keeps everything")
+		retainInfo = flag.Duration("retain-info", 0, "delete records of level info and debug older than this, 0 to use -retain only")
+		retainRecs = flag.Int("retain-records", 0, "keep at most this many records in total, oldest deleted first, 0 for no limit")
+		retainHost = flag.Int("retain-host-records", 0, "keep at most this many records per host, oldest deleted first, 0 for no limit")
 
 		rulesFile    = flag.String("rules", "", "file with extra incident rules (\"name severity regexp\" or \"name off\")")
 		silentAfter  = flag.Duration("silent-after", 2*time.Minute, "time without packets before a silent incident is opened, 0 to disable")
 		crashWait    = flag.Duration("crash-wait", 2*time.Minute, "time after a reboot to wait for pstore lines before deciding crash or reboot")
 		ctxLines     = flag.Int("incident-context", 200, "log lines kept as context of an incident")
 		resolveAfter = flag.Duration("resolve-after", 30*time.Minute, "close a kernel error incident as resolved after this long without a new matching line, 0 never")
-		alertFormat  = flag.String("alert-format", "json", "default alert body: json, or slack for Slack and Mattermost")
+		alertFormat  = flag.String("alert-format", "json", "default alert body: json, slack for Slack and Mattermost, or alertmanager for the Alertmanager v2 API")
 		alertKey     = flag.String("alert-key-file", "", "default hex key file used to sign alerts in the X-Lastgasp-Signature header")
 		alertMin     = flag.String("alert-min-severity", "warning", "default lowest severity that sends an alert: info, warning or critical")
 		alertRate    = flag.Duration("alert-rate-limit", 10*time.Minute, "default limit of one alert per host, incident kind and rule in this time")
@@ -51,13 +56,22 @@ func main() {
 		authProxy    = flag.String("auth-proxy-header", "", "header with the client address set by a reverse proxy, like X-Forwarded-For")
 		authTrusted  = flag.String("auth-trusted-proxies", "127.0.0.1,::1", "comma separated addresses or CIDR prefixes allowed to set -auth-proxy-header")
 		authMetrics  = flag.Bool("auth-metrics", false, "also require a login for /metrics")
+		sessionTTL   = flag.Duration("session-ttl", 7*24*time.Hour, "how long a login on the web UI lasts")
 		publicURL    = flag.String("public-url", "", "web UI address used for links in alerts, for example https://lastgasp.example.net")
+		showVer      = flag.Bool("version", false, "print the version and exit")
+		agentAddr    = flag.String("agent-address", "", "host:port agents send to, used in install commands. Default: the -public-url host with the -listen port")
+		repoURL      = flag.String("repo-url", "https://git.fferrando.cc/rdfilippo/lastgasp", "repository whose releases hold the agent and its installer")
 	)
-	var webhooks, emails stringList
+	var webhooks, emails, telegrams stringList
 	flag.Var(&webhooks, "alert-webhook", "alert target, repeatable: a URL, or \"name=N,format=F,min=S,key-file=P,rate=D,url=URL\"")
 	flag.Usage = usage
+	flag.Var(&telegrams, "alert-telegram", "Telegram alert target, repeatable: \"chat=ID,token-file=PATH\" plus name, min, rate, api")
 	flag.Var(&emails, "alert-email", "email alert target, repeatable: \"to=A,B,smtp=HOST:PORT\" plus name, min, rate, from, user, password-file")
 	flag.Parse()
+	if *showVer {
+		fmt.Println("lastgasp-server", version.String())
+		return
+	}
 	if flag.NArg() > 0 {
 		os.Exit(command(flag.Args()))
 	}
@@ -77,8 +91,12 @@ func main() {
 		fail("start", errors.New("-rcvbuf must be above 0"))
 	case *retain < 0 || *silentAfter < 0 || *crashWait < 0 || *resolveAfter < 0 || *alertRate < 0:
 		fail("start", errors.New("durations must not be negative"))
-	case *retain > 0 && *retain < time.Hour:
-		fail("start", errors.New("-retain must be at least 1h, or 0 to keep everything"))
+	case *retain > 0 && *retain < time.Hour, *retainInfo > 0 && *retainInfo < time.Hour:
+		fail("start", errors.New("-retain and -retain-info must be at least 1h, or 0"))
+	case *retainInfo < 0 || *retainRecs < 0 || *retainHost < 0:
+		fail("start", errors.New("retention limits must not be negative"))
+	case *sessionTTL < time.Minute:
+		fail("start", errors.New("-session-ttl must be at least 1m"))
 	case *ctxLines < 1 || *ctxLines > 10000:
 		fail("start", errors.New("-incident-context must be between 1 and 10000"))
 	}
@@ -87,12 +105,11 @@ func main() {
 		fail("start", fmt.Errorf("-auth-trusted-proxies: %w", err))
 	}
 
-	if *keyFile == "" {
-		fail("start", errors.New("-key-file is required"))
-	}
-	keys, err := server.OpenKeyFile(*keyFile)
-	if err != nil {
-		fail("load keys", err)
+	var keyFileRing *server.KeyFile
+	if *keyFile != "" {
+		if keyFileRing, err = server.OpenKeyFile(*keyFile); err != nil {
+			fail("load keys", err)
+		}
 	}
 	rules, err := incident.LoadRules(*rulesFile)
 	if err != nil {
@@ -128,7 +145,17 @@ func main() {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	metrics := server.NewMetrics(reg, tr, *stale)
+	enrolled := server.NewEnrolledKeys()
+	if err := enrolled.Load(ctx, st); err != nil {
+		fail("load enrolled agents", err)
+	}
+	keys := &server.Keys{File: keyFileRing, Enrolled: enrolled}
+	if keyFileRing == nil {
+		log.Info("no -key-file, only enrolled agents are accepted")
+	}
 	in := server.NewIngestor(st, tr, keys, metrics, log)
+	enroller := &server.Enroller{Store: st, Keys: keys, Log: log, Results: metrics.Enrollments}
+	in.Enroller = enroller
 
 	im := incident.NewMetrics(reg)
 	det := incident.NewDetector(st, rules, incident.Config{SilentAfter: *silentAfter, CrashWait: *crashWait, Context: *ctxLines,
@@ -137,9 +164,12 @@ func main() {
 		RateLimit: *alertRate, Metrics: im, Log: log}
 	var targets incident.Notifiers
 	names := map[string]bool{}
-	specs := make([]func() (*incident.Notifier, error), 0, len(webhooks)+len(emails))
+	specs := make([]func() (*incident.Notifier, error), 0, len(webhooks)+len(emails)+len(telegrams))
 	for _, spec := range webhooks {
 		specs = append(specs, func() (*incident.Notifier, error) { return incident.ParseTarget(spec, def) })
+	}
+	for _, spec := range telegrams {
+		specs = append(specs, func() (*incident.Notifier, error) { return incident.ParseTelegramTarget(spec, def) })
 	}
 	for _, spec := range emails {
 		specs = append(specs, func() (*incident.Notifier, error) { return incident.ParseEmailTarget(spec, def) })
@@ -169,8 +199,11 @@ func main() {
 		workers.Go(func() { targets.Run(ctx) })
 	}
 	workers.Go(func() { det.Run(ctx) })
-	if *retain > 0 {
-		r := &server.Retention{Store: st, Tracker: tr, Detector: det, Metrics: metrics, Log: log, Age: *retain, Every: time.Hour}
+	self := &server.SelfCheck{Detector: det, Checks: server.ServerChecks(metrics, im), Every: 10 * time.Second}
+	workers.Go(func() { self.Run(ctx) })
+	r := &server.Retention{Store: st, Tracker: tr, Detector: det, Metrics: metrics, Log: log, Age: *retain,
+		InfoAge: *retainInfo, MaxRecords: *retainRecs, MaxHostRecords: *retainHost, Every: 10 * time.Minute}
+	if r.Enabled() {
 		workers.Go(func() { r.Run(ctx) })
 	}
 
@@ -183,17 +216,30 @@ func main() {
 			log.Warn("set udp receive buffer", "err", err)
 		}
 	}
+	enroller.Reply = func(b []byte, to net.Addr) { conn.WriteTo(b, to) }
+	workers.Go(func() { enroller.Run(ctx) })
 	go in.Listen(conn)
 	done := make(chan struct{})
 	go func() { in.Run(ctx); close(done) }()
 
-	api := &server.API{Store: st, Tracker: tr, StaleAfter: *stale, Gatherer: reg, Context: *ctxLines, AuthMetrics: *authMetrics}
+	ready := func(ctx context.Context) error {
+		if err := st.Ping(ctx); err != nil {
+			return fmt.Errorf("database: %w", err)
+		}
+		return in.Ready()
+	}
+	install := server.Install{AgentAddress: server.AgentAddress(*agentAddr, *publicURL, conn.LocalAddr().String()),
+		RepoURL: *repoURL, Version: version.String()}
+	api := &server.API{Ready: ready, Enrolled: enrolled, Install: install, Store: st, Tracker: tr, StaleAfter: *stale, Gatherer: reg, Context: *ctxLines, AuthMetrics: *authMetrics,
+		Detector: det}
 	if *authFile != "" {
 		if api.Auth, err = server.OpenAuth(*authFile); err != nil {
 			fail("load auth file", err)
 		}
 		api.Auth.Failures, api.Auth.Blocked, api.Auth.ProxyHeader = metrics.AuthFailures, metrics.AuthBlocked, *authProxy
 		api.Auth.TrustedProxies = trusted
+		api.Auth.Sessions, api.Auth.SessionTTL = st, *sessionTTL
+		api.Auth.SecureCookie = strings.HasPrefix(*publicURL, "https://")
 	} else if !server.Loopback(*httpAddr) {
 		log.Warn("the web UI and API have no login and listen on a public address, use -auth-file", "http", *httpAddr)
 	}
@@ -201,11 +247,13 @@ func main() {
 	// SIGHUP reloads the key file, the rules and the auth file. On error the old ones stay in use.
 	go func() {
 		for range hup {
-			if err := keys.Reload(); err != nil {
+			if keyFileRing == nil {
+				// Only enrolled agents, no key file to read.
+			} else if err := keyFileRing.Reload(); err != nil {
 				log.Error("reload keys, keeping the old ones", "err", err)
 				metrics.KeyReloads.WithLabelValues("error").Inc()
 			} else {
-				log.Info("keys reloaded", "entries", keys.Hosts())
+				log.Info("keys reloaded", "entries", keyFileRing.Hosts())
 				metrics.KeyReloads.WithLabelValues("ok").Inc()
 			}
 			if api.Auth != nil {
@@ -234,7 +282,7 @@ func main() {
 			stop()
 		}
 	}()
-	log.Info("lastgasp-server started", "udp", conn.LocalAddr().String(), "http", *httpAddr, "db", redact(*dsn))
+	log.Info("lastgasp-server started", "version", version.String(), "udp", conn.LocalAddr().String(), "http", *httpAddr, "db", redact(*dsn))
 
 	// Shutdown order: stop taking packets and requests, store what is queued, let the workers save, then close the database.
 	<-ctx.Done()
@@ -256,12 +304,23 @@ func main() {
 func usage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprintf(out, "Usage:\n  lastgasp-server [flags]\n  lastgasp-server user NAME ROLE    print an auth file line, asks for the password\n")
-	fmt.Fprintf(out, "  lastgasp-server token NAME ROLE   print a new API token and its auth file line\nROLE is viewer or admin.\n\nFlags:\n")
+	fmt.Fprintf(out, "  lastgasp-server token NAME ROLE   print a new API token and its auth file line\n")
+	fmt.Fprintf(out, "  lastgasp-server health [URL]      exit 0 when URL answers 200, default %s\nROLE is viewer or admin.\n\nFlags:\n", healthURL)
 	flag.PrintDefaults()
 }
 
-// command runs the helper commands that create auth file lines.
+// healthURL is checked by the health command, for container health checks.
+const healthURL = "http://127.0.0.1:8080/readyz"
+
+// command runs the helper commands: auth file lines and the health check.
 func command(args []string) int {
+	if args[0] == "health" && len(args) <= 2 {
+		u := healthURL
+		if len(args) == 2 {
+			u = args[1]
+		}
+		return health(u)
+	}
 	if len(args) != 3 || (args[0] != "user" && args[0] != "token") {
 		usage()
 		return 2
@@ -287,6 +346,23 @@ func command(args []string) int {
 		return 1
 	}
 	fmt.Println(line)
+	return 0
+}
+
+// health checks one URL, as distroless images have no curl.
+func health(u string) int {
+	c := &http.Client{Timeout: 5 * time.Second}
+	resp, err := c.Get(u)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "%s: %s %s", u, resp.Status, b)
+		return 1
+	}
 	return 0
 }
 

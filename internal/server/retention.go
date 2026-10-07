@@ -9,15 +9,26 @@ import (
 	"lastgasp/internal/store"
 )
 
-// Retention deletes data older than Age: records, closed incidents, old boots and agent runs.
+// Retention deletes old data. Every limit is optional, zero turns it off.
 type Retention struct {
 	Store    *store.Store
 	Tracker  *Tracker
 	Detector *incident.Detector // may be nil
 	Metrics  *Metrics
 	Log      *slog.Logger
-	Age      time.Duration
-	Every    time.Duration
+	// Age removes records, closed incidents, old boots and agent runs older than this.
+	Age time.Duration
+	// InfoAge removes records of level info and debug older than this.
+	InfoAge time.Duration
+	// MaxRecords and MaxHostRecords keep the newest records, in total and per host.
+	MaxRecords     int
+	MaxHostRecords int
+	Every          time.Duration
+}
+
+// Enabled reports whether any limit is set.
+func (r *Retention) Enabled() bool {
+	return r.Age > 0 || r.InfoAge > 0 || r.MaxRecords > 0 || r.MaxHostRecords > 0
 }
 
 // Run deletes old data a minute after start and then every r.Every, until ctx is done.
@@ -37,8 +48,53 @@ func (r *Retention) Run(ctx context.Context) {
 	}
 }
 
-// RunOnce deletes everything older than now minus r.Age.
+// RunOnce applies every limit as of now.
 func (r *Retention) RunOnce(ctx context.Context, now time.Time) error {
+	recs, err := r.trim(ctx, now)
+	if recs > 0 {
+		r.Log.Info("retention", "records", recs)
+	}
+	if err != nil || r.Age <= 0 {
+		return err
+	}
+	return r.byAge(ctx, now)
+}
+
+// trim applies the limits that only remove records.
+func (r *Retention) trim(ctx context.Context, now time.Time) (int64, error) {
+	var total int64
+	count := func(n int64, err error) error {
+		total += n
+		r.Metrics.RetentionDeleted.WithLabelValues("records").Add(float64(n))
+		return err
+	}
+	// Info and debug lines are the bulk of most logs, so they go first.
+	if r.InfoAge > 0 {
+		if err := count(r.Store.DeleteLevelBefore(ctx, 6, now.Add(-r.InfoAge))); err != nil {
+			return total, err
+		}
+	}
+	if r.MaxHostRecords > 0 {
+		hosts, err := r.Store.RecordHosts(ctx)
+		if err != nil {
+			return total, err
+		}
+		for _, h := range hosts {
+			if err := count(r.Store.TrimRecords(ctx, h, r.MaxHostRecords)); err != nil {
+				return total, err
+			}
+		}
+	}
+	if r.MaxRecords > 0 {
+		if err := count(r.Store.TrimRecords(ctx, "", r.MaxRecords)); err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// byAge deletes everything older than now minus r.Age.
+func (r *Retention) byAge(ctx context.Context, now time.Time) error {
 	cutoff := now.Add(-r.Age)
 	recs, err := r.Store.DeleteRecordsBefore(ctx, cutoff)
 	r.Metrics.RetentionDeleted.WithLabelValues("records").Add(float64(recs))
@@ -54,6 +110,10 @@ func (r *Retention) RunOnce(ctx context.Context, now time.Time) error {
 		return err
 	}
 	r.Metrics.RetentionDeleted.WithLabelValues("boots").Add(float64(n))
+	if n, err = r.Store.DeleteSilencesBefore(ctx, cutoff); err != nil {
+		return err
+	}
+	r.Metrics.RetentionDeleted.WithLabelValues("silences").Add(float64(n))
 	streams := r.Tracker.Prune(cutoff)
 	for i, s := range streams {
 		if err := r.Store.DeleteStream(ctx, s.Host, s.BootID, s.Instance); err != nil {

@@ -1,0 +1,94 @@
+# A production setup: PostgreSQL, HTTPS with a login, agents that enroll with join tokens,
+# Telegram alerts, retention limits and /metrics behind the login.
+#
+#   echo "123456:ABC-your-bot-token" > telegram.token
+#   printf '%s\n' 'alice-password' | docker run --rm -i git.fferrando.cc/rdfilippo/lastgasp-server user alice admin > auth
+#   sudo chown 65532:65532 auth telegram.token && chmod 600 auth telegram.token
+#   cp .env.example .env and fill it in
+#   docker compose up -d
+#
+# Agents: log in, click "add agents", run the command on each machine. Enrolled keys live in the database.
+# Back up the database (docs/operations.md) and the auth and telegram.token files.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lastgasp
+      POSTGRES_DB: lastgasp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lastgasp -d lastgasp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [db]
+
+  server:
+    image: git.fferrando.cc/rdfilippo/lastgasp-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=postgres://lastgasp@db:5432/lastgasp?sslmode=disable
+      # 90 days for errors, 14 days for info and debug lines, and a hard cap.
+      - -retain=2160h
+      - -retain-info=336h
+      - -retain-host-records=2000000
+      - -retain-records=50000000
+      - -auth-file=/etc/lastgasp/auth
+      - -auth-metrics
+      - -auth-proxy-header=X-Forwarded-For
+      - -auth-trusted-proxies=172.31.251.0/24
+      - -public-url=https://${LASTGASP_DOMAIN:?set LASTGASP_DOMAIN in .env}
+      # Agents reach the UDP port on the same name. Install commands use it.
+      - -agent-address=${LASTGASP_DOMAIN}:5140
+      - -alert-telegram=chat=${TELEGRAM_CHAT:?set TELEGRAM_CHAT in .env},token-file=/run/secrets/telegram_token
+      # Planned reboots: add a silence in the UI before the maintenance window.
+    secrets:
+      - telegram_token
+    volumes:
+      - ./auth:/etc/lastgasp/auth:ro
+    ports:
+      - "5140:5140/udp"
+    networks: [db, web]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      LASTGASP_DOMAIN: ${LASTGASP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [web]
+
+secrets:
+  telegram_token:
+    file: ./telegram.token
+
+# The database is on its own network, out of reach of the proxy.
+networks:
+  db:
+  web:
+    ipam:
+      config:
+        - subnet: 172.31.251.0/24
+
+volumes:
+  pgdata:
+  caddydata:
+  caddyconfig:

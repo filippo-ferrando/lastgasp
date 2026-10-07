@@ -1,0 +1,43 @@
+# Tests pushes to main and pull requests. Tags are tested by release.yaml.
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The docker compose check in make test skips itself when docker is missing.
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # 32 bit ARM has its own type sizes, and the release builds it.
+      - name: Build for every release architecture
+        run: |
+          for arch in amd64 arm64 arm; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOARM=7 go build -o /dev/null ./cmd/... || exit 1
+          done
+
+      - name: Test
+        run: make test

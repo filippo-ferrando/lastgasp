@@ -2,8 +2,10 @@ package incident
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,9 +21,17 @@ const (
 	KindReboot      = "reboot"
 	KindSilent      = "silent"
 	KindKernelError = "kernel_error"
+	// KindServer is a problem of the lastgasp server itself, like database errors.
+	KindServer = "server"
 )
 
-var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError}
+// ServerHost is the host name of server incidents. Agent hosts should not use it.
+const ServerHost = "@server"
+
+var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError, KindServer}
+
+// Kinds lists every incident kind.
+func Kinds() []string { return slices.Clone(kinds) }
 
 // Config tunes the detector.
 type Config struct {
@@ -30,6 +40,8 @@ type Config struct {
 	Context     int           // number of log lines kept as context of an incident
 	// ResolveAfter closes a kernel error incident as resolved when no new line matched for this long, 0 never.
 	ResolveAfter time.Duration
+	// ServerQuiet closes a server incident as resolved after this long without a new problem, default 5 minutes.
+	ServerQuiet time.Duration
 }
 
 // Metrics are the incident Prometheus metrics.
@@ -48,7 +60,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "lastgasp_incidents_open", Help: "Incidents still going on.",
 		}, []string{"kind"}),
 		Alerts: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "lastgasp_alerts_total", Help: "Incident alerts by target and result (sent, resolved, failed, suppressed).",
+			Name: "lastgasp_alerts_total", Help: "Incident alerts by target and result (sent, resolved, failed, suppressed, silenced).",
 		}, []string{"target", "result"}),
 	}
 	reg.MustRegister(m.Created, m.Open, m.Alerts)
@@ -95,6 +107,9 @@ type Detector struct {
 func NewDetector(st *store.Store, rules *Rules, cfg Config, m *Metrics, log *slog.Logger) *Detector {
 	if cfg.Context <= 0 {
 		cfg.Context = 200
+	}
+	if cfg.ServerQuiet <= 0 {
+		cfg.ServerQuiet = 5 * time.Minute
 	}
 	d := &Detector{Store: st, Log: log, Metrics: m, Wake: func() {}, cfg: cfg,
 		hosts: map[string]*hostState{}, open: map[string]*store.Incident{}, dirty: map[int64]*store.Incident{},
@@ -320,6 +335,11 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 			inc.Resolved = true
 			d.close(ctx, key, inc, now)
 			wake = true
+		case inc.Kind == KindServer && now.Sub(inc.UpdatedAt) >= d.cfg.ServerQuiet:
+			inc.Summary += fmt.Sprintf(" (no new problem for %s)", now.Sub(inc.UpdatedAt).Round(time.Second))
+			inc.Resolved = true
+			d.close(ctx, key, inc, now)
+			wake = true
 		}
 	}
 	d.mu.Unlock()
@@ -379,6 +399,57 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 	if wake {
 		d.Wake()
 	}
+}
+
+// ServerProblem notes n new problems of the server itself under rule. It opens a server incident,
+// or adds to the open one, which then stays open until no problem was seen for ServerQuiet.
+func (d *Detector) ServerProblem(ctx context.Context, rule string, sev store.Severity, n int, summary string, now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if inc := d.open[openKey(ServerHost, "", KindServer, rule)]; inc != nil {
+		inc.Count += n
+		inc.Summary, inc.UpdatedAt = summary, now
+		d.dirty[inc.ID] = inc
+		return
+	}
+	d.create(ctx, &store.Incident{Host: ServerHost, Kind: KindServer, Severity: sev, Rule: rule, Count: n,
+		Summary: summary, OpenedAt: now, UpdatedAt: now})
+	d.updateOpen()
+	d.Wake()
+}
+
+// Errors of Resolve for incidents the detector still decides on.
+var (
+	ErrRebootPending = errors.New("the reboot is waiting for the crash check")
+	ErrSilentOpen    = errors.New("a silent host incident closes when the host sends again, acknowledge it or add a silence")
+)
+
+// Resolve closes an incident as resolved by user, so targets that got an alert get a second one.
+// A new problem of the same kind opens a new incident.
+func (d *Detector) Resolve(ctx context.Context, id int64, user, note string, now time.Time) error {
+	d.mu.Lock()
+	for key, inc := range d.open {
+		if inc.ID != id {
+			continue
+		}
+		switch inc.Kind {
+		case KindReboot:
+			d.mu.Unlock()
+			return ErrRebootPending
+		case KindSilent:
+			d.mu.Unlock()
+			return ErrSilentOpen
+		}
+		inc.Resolved = true
+		d.close(ctx, key, inc, now)
+		d.updateOpen()
+	}
+	d.mu.Unlock()
+	if err := d.Store.ResolveIncident(ctx, id, user, note, now); err != nil {
+		return err
+	}
+	d.Wake()
+	return nil
 }
 
 func (d *Detector) saveDirty(ctx context.Context) {

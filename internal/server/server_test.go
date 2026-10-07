@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -767,9 +769,228 @@ func TestRetiredBootIsNoReboot(t *testing.T) {
 func TestUIHasControls(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
 	page := e.get(t, "/")
-	for _, id := range []string{"inc-ack", "inc-copy", "inc-logs", "inc-msg", "f-clear", "f-live", "more", "jump", "download"} {
+	for _, id := range []string{"inc-ack", "inc-copy", "inc-logs", "inc-msg", "inc-note", "inc-resolve", "inc-silence", "sil-add", "silences", "tok-add", "agents", "logout",
+		"f-clear", "f-live", "more", "jump", "download"} {
 		if !strings.Contains(page, `id="`+id+`"`) {
 			t.Errorf("control %q missing", id)
 		}
 	}
+}
+
+// TestAgentRestartSendsStashedRecords runs an agent while no server answers, stops it, removes the
+// pstore file, and checks that the next run still delivers the lines from the stash.
+func TestAgentRestartSendsStashedRecords(t *testing.T) {
+	shm, err := os.MkdirTemp("/dev/shm", "lastgasp-test-")
+	if err != nil {
+		t.Skip("no /dev/shm:", err)
+	}
+	defer os.RemoveAll(shm)
+	dir := t.TempDir()
+	bootFile, pstoreDir := filepath.Join(dir, "boot_id"), filepath.Join(dir, "pstore")
+	os.WriteFile(bootFile, []byte("6f1c2a5e-0d4b-4e8a-9c3f-2b7d1e5a8c90\n"), 0o600)
+	os.Mkdir(pstoreDir, 0o700)
+	os.WriteFile(filepath.Join(pstoreDir, "dmesg-ramoops-0"), []byte("<0>[1.0] Kernel panic - not syncing\n<4>[1.1] last words\n"), 0o600)
+
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	cfg := agent.Config{Servers: []string{silent.LocalAddr().String()}, Key: testKey, Host: "node-1", BootIDPath: bootFile,
+		KmsgPath: filepath.Join(dir, "no-kmsg"), PstoreDir: pstoreDir, BufferSize: 100, Heartbeat: 100 * time.Millisecond,
+		WaitAck: true, ResolveEvery: time.Minute, MaxPstoreFile: 1 << 20, StashPath: filepath.Join(shm, "agent.stash"), StashSize: agent.MinStash}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	agent.Run(ctx, cfg, agent.NewLogger(io.Discard, 100))
+	cancel()
+	// systemd-pstore moves the files away, so only the stash still has the lines.
+	os.Remove(filepath.Join(pstoreDir, "dmesg-ramoops-0"))
+
+	e := newEnv(t, filepath.Join(dir, "db"))
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go e.in.Listen(conn)
+	defer conn.Close()
+	cfg.Servers = []string{conn.LocalAddr().String()}
+	ctx, cancel = context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { agent.Run(ctx, cfg, agent.NewLogger(io.Discard, 100)); close(done) }()
+	recs := e.waitRecords(t, 2)
+	cancel()
+	<-done
+	if recs[0].Source != "pstore" || recs[0].Message != "Kernel panic - not syncing" || recs[1].Message != "last words" {
+		t.Fatalf("records %+v", recs)
+	}
+}
+
+func TestRetentionRecordLimits(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	for i := uint64(1); i <= 5; i++ {
+		p := kmsgPkt(1, 1, i, i, i, fmt.Sprint("line ", i))
+		p.Record.Priority = 6
+		if i == 1 {
+			p.Record.Priority = 3
+		}
+		e.send(t, p)
+	}
+	e.waitRecords(t, 5)
+	r := &Retention{Store: e.st, Tracker: e.tr, Metrics: e.metrics, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		InfoAge: time.Hour, MaxHostRecords: 3}
+	if !r.Enabled() {
+		t.Fatal("retention not enabled")
+	}
+	if err := r.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	recs := e.waitRecords(t, 3)
+	if recs[0].Message != "line 3" {
+		t.Fatalf("records %+v", recs)
+	}
+	// The host limit already removed the error, and two hours later the info lines are old enough to go.
+	if err := r.RunOnce(context.Background(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	e.waitRecords(t, 0)
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_retention_deleted_total{table="records"} 5`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+	if len(e.tr.Snapshot()) != 1 {
+		t.Fatal("record limits must not prune agent runs")
+	}
+}
+
+func TestSelfCheckOpensServerIncident(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	sc := &SelfCheck{Detector: e.det, Checks: ServerChecks(e.metrics, incident.NewMetrics(prometheus.NewRegistry()))}
+	ctx := context.Background()
+	sc.RunOnce(ctx, time.Now())
+	b, _ := wire.Encode(kmsgPkt(1, 1, 1, 0, 0, "x"), bytes.Repeat([]byte{2}, 32))
+	e.in.Handle(b, nil)
+	e.in.Handle(b, nil)
+	e.in.Handle([]byte("garbage"), nil) // random packets are not a key problem
+	sc.RunOnce(ctx, time.Now())
+	sc.RunOnce(ctx, time.Now())
+	e.det.Flush(ctx)
+	l, err := e.st.Incidents(ctx, store.IncidentFilter{Kind: incident.KindServer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l) != 1 || l[0].Rule != "keys" || l[0].Count != 2 || l[0].Host != incident.ServerHost {
+		t.Fatalf("incidents %+v", l)
+	}
+}
+
+func TestIncidentWorkflowAPI(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	api := &API{Store: e.st, Tracker: e.tr, StaleAfter: time.Minute, Gatherer: e.reg, Detector: e.det}
+	srv := httptest.NewServer(api.Handler())
+	defer srv.Close()
+	call := func(method, path, body string, want int) string {
+		t.Helper()
+		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != want {
+			t.Fatalf("%s %s: %d %s", method, path, resp.StatusCode, b)
+		}
+		return string(b)
+	}
+	e.send(t, kmsgPkt(1, 1, 1, 1, 1, "Out of memory: Killed process 7"))
+	e.waitRecords(t, 1)
+	e.det.Flush(context.Background())
+
+	if b := call("POST", "/api/incidents/1/ack", `{"note":"looking at it"}`, 200); !strings.Contains(b, `"acked_by":"admin"`) ||
+		!strings.Contains(b, `"note":"looking at it"`) {
+		t.Fatalf("ack: %s", b)
+	}
+	call("POST", "/api/incidents/1/ack", ``, 200) // the body is optional
+	if b := call("POST", "/api/incidents/1/resolve", `{"note":"memory limit raised"}`, 200); !strings.Contains(b, `"resolved":true`) ||
+		!strings.Contains(b, `"closed_at"`) || !strings.Contains(b, `"note":"memory limit raised"`) {
+		t.Fatalf("resolve: %s", b)
+	}
+	call("POST", "/api/incidents/99/resolve", `{}`, 404)
+
+	call("POST", "/api/silences", `{"host":"node-*","kind":"nope","duration":"1h"}`, 400)
+	call("POST", "/api/silences", `{"host":"node-*","duration":"-1h"}`, 400)
+	b := call("POST", "/api/silences", `{"host":"node-*","kind":"reboot","duration":"1h","comment":"kernel update"}`, 201)
+	var sl store.Silence
+	json.Unmarshal([]byte(b), &sl)
+	if sl.ID == 0 || sl.CreatedBy != "admin" || sl.EndsAt.Sub(sl.StartsAt) != time.Hour || sl.StartsAt.Location() != time.UTC {
+		t.Fatalf("silence: %s", b)
+	}
+	if b := call("GET", "/api/silences", "", 200); !strings.Contains(b, "kernel update") {
+		t.Fatalf("list: %s", b)
+	}
+	call("DELETE", "/api/silences/"+strconv.FormatInt(sl.ID, 10), "", 204)
+	if b := call("GET", "/api/silences", "", 200); strings.TrimSpace(b) != "[]" {
+		t.Fatalf("ended silence still active: %s", b)
+	}
+	if b := call("GET", "/api/silences?all=1", "", 200); !strings.Contains(b, "kernel update") {
+		t.Fatalf("ended silence not listed with all=1: %s", b)
+	}
+}
+
+func TestVersionsInAPIAndMetrics(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{1}, Instance: 1, Seq: 1, Kind: wire.KindHeartbeat, AgentVersion: "v9.8.7"})
+	for deadline := time.Now().Add(5 * time.Second); len(e.tr.Snapshot()) == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if b := e.get(t, "/api/hosts"); !strings.Contains(b, `"agent_version":"v9.8.7"`) {
+		t.Fatalf("hosts: %s", b)
+	}
+	if b := e.get(t, "/api/me"); !strings.Contains(b, `"version":"dev`) {
+		t.Fatalf("me: %s", b)
+	}
+	m := e.get(t, "/metrics")
+	if !strings.Contains(m, `lastgasp_agent_info{host="node-1",version="v9.8.7"} 1`) || !strings.Contains(m, `lastgasp_build_info{goversion=`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	dbDown := false
+	api := &API{Store: e.st, Tracker: e.tr, Gatherer: e.reg, Ready: func(ctx context.Context) error {
+		if dbDown {
+			return errors.New("database: closed")
+		}
+		return e.in.Ready()
+	}}
+	srv := httptest.NewServer(api.Handler())
+	defer srv.Close()
+	status := func() (int, string) {
+		resp, err := http.Get(srv.URL + "/readyz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, body := status(); code != 503 || !strings.Contains(body, "not reading UDP") {
+		t.Fatalf("before listen: %d %s", code, body)
+	}
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go e.in.Listen(conn)
+	for deadline := time.Now().Add(2 * time.Second); !e.in.listening.Load() && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if code, body := status(); code != 200 {
+		t.Fatalf("ready: %d %s", code, body)
+	}
+	dbDown = true
+	if code, body := status(); code != 503 || !strings.Contains(body, "database") {
+		t.Fatalf("db down: %d %s", code, body)
+	}
+	conn.Close()
 }

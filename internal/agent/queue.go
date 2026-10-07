@@ -30,6 +30,8 @@ type Queue struct {
 	resend []uint64 // seqs to send again, oldest first
 	nextID uint64
 	notify chan struct{}
+	stash  *Stash // keeps a copy of pushed items, may be nil
+	tag    uint8
 }
 
 func NewQueue(capacity int) *Queue {
@@ -40,6 +42,26 @@ func NewQueue(capacity int) *Queue {
 }
 
 func (q *Queue) at(i int) *Item { return &q.buf[(q.head+i)%len(q.buf)] }
+
+// Mirror copies every item pushed from now on to s, under tag.
+func (q *Queue) Mirror(s *Stash, tag uint8) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.stash, q.tag = s, tag
+	q.syncStash()
+}
+
+// syncStash tells the stash the id of the oldest item still needed.
+func (q *Queue) syncStash() {
+	if q.stash == nil {
+		return
+	}
+	need := q.nextID + 1
+	if q.n > 0 {
+		need = q.at(0).id
+	}
+	q.stash.Need(q.tag, need)
+}
 
 // Push adds an item and reports whether an item never sent was dropped to make room.
 // A sent but unconfirmed item dropped this way most likely arrived, so it is not reported.
@@ -60,6 +82,9 @@ func (q *Queue) Push(it Item) (dropped bool) {
 	}
 	q.buf[(q.head+q.n)%len(q.buf)] = it
 	q.n++
+	if q.stash != nil {
+		q.stash.Append(q.tag, it.id, &it)
+	}
 	q.mu.Unlock()
 	select {
 	case q.notify <- struct{}{}:
@@ -77,6 +102,7 @@ func (q *Queue) trim() {
 		q.sent--
 		q.done--
 	}
+	q.syncStash()
 }
 
 // find returns the index of the sent item with seq, or -1. Sent items are in seq order.

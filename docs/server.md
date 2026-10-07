@@ -2,9 +2,31 @@
 
 `lastgasp-server` receives agent packets on UDP, stores the logs in SQLite or PostgreSQL, finds incidents, sends alerts and serves the web UI, a JSON API and Prometheus metrics, all from one process.
 
-## Key file
+## Keys and enrollment
 
-One `host hexkey` line per host. `*` matches every host without its own line. Empty lines and `#` comments are ignored. Keys are at least 16 bytes (32 hex characters).
+Every agent encrypts its packets with a key the server knows. There are two ways to give an agent its key, and both work side by side.
+
+### Enrollment
+
+An admin makes a join token in the UI (Agents, "add agents") or with the API, and runs the install command it shows on the new machine. The agent proves it knows the token and sends an X25519 public key to the server UDP port, the server answers with its own public key, and both derive the agent key. Neither the key nor the token travels, so this is safe on a network without HTTPS. Enrolled keys are kept in the database. Details in [how-it-works.md](how-it-works.md#enrollment).
+
+| Token setting | Choices in the UI | API field |
+| --- | --- | --- |
+| uses | 1 agent, 10 agents, no limit | `uses`, 0 for no limit |
+| valid for | 1 hour, 24 hours, 7 days | `ttl`, from 1m to 8760h |
+| comment | free text | `comment` |
+
+- The token is shown once. The database keeps its hash.
+- Enrolling a host again (a reinstall) replaces its key. A host that has its own line in the key file cannot enroll: the file wins.
+- Revoking a token stops new enrollments. Revoking an agent key in the Agents table refuses the packets of that host until it enrolls again.
+- Each address may try a few times per second, and is ignored for 10 minutes after 10 wrong tokens. A wrong token gets a short answer, smaller than the request, so the port cannot be used to amplify traffic.
+- Only a client with a usable token learns whether a host has a line in the key file.
+
+The install command uses `-agent-address` (default: the `-public-url` host with the `-listen` port) and the release of the server version from `-repo-url`. Development builds use the newest installer from the main branch, which installs the newest release.
+
+### Key file
+
+With `-key-file`: one `host hexkey` line per host. `*` matches every host without its own line or enrolled key. Empty lines and `#` comments are ignored. Keys are at least 16 bytes (32 hex characters). Without `-key-file`, only enrolled agents are accepted.
 
 ```text
 # /etc/lastgasp/keys
@@ -13,17 +35,18 @@ web-01  77a2d0...10
 *       9a02ff...7b
 ```
 
-Packets from a host without a key are dropped and counted as `unknown_host`. The file holds secrets: make it readable only by the server user (see below).
+A key is looked up in this order: the host line in the key file, the enrolled key, the `*` line. Packets from a host without a key are dropped and counted as `unknown_host`. The file holds secrets: make it readable only by the server user (see below).
 
 ## Install as a systemd service
 
 ```sh
-make server
-install -m 755 bin/lastgasp-server /usr/local/bin/
+curl -fsSLo lastgasp-server https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/lastgasp-server-linux-amd64
+curl -fsSLO https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/lastgasp-server.service
+install -m 755 lastgasp-server /usr/local/bin/
 useradd --system --no-create-home --shell /usr/sbin/nologin lastgasp
 install -d -m 750 -g lastgasp /etc/lastgasp
-install -m 640 -g lastgasp keys /etc/lastgasp/keys
-install -m 644 deploy/lastgasp-server.service /etc/systemd/system/
+install -m 640 -g lastgasp keys /etc/lastgasp/keys      # only with a key file
+install -m 644 lastgasp-server.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now lastgasp-server
 journalctl -u lastgasp-server -f
@@ -49,15 +72,16 @@ ExecStart=/usr/local/bin/lastgasp-server -listen :5140 -http 127.0.0.1:8080 -db 
 
 ## Run with Docker
 
-The image is built from `Dockerfile`: a static binary in a distroless image, running as uid 65532. It uses SQLite in the `/var/lib/lastgasp` volume by default.
+Each release pushes `git.fferrando.cc/rdfilippo/lastgasp-server` for amd64 and arm64, tagged `v1.2.0`, `1.2.0`, `1.2` and `latest`. `make image` builds the same image from a checkout as `lastgasp-server`. It is a static binary in a distroless image, running as uid 65532, with SQLite in the `/var/lib/lastgasp` volume by default.
 
 ```sh
-make image
 docker run -d --name lastgasp --restart unless-stopped \
   -p 5140:5140/udp -p 127.0.0.1:8080:8080 \
   -v ./keys:/etc/lastgasp/keys:ro -v lastgasp:/var/lib/lastgasp \
-  lastgasp-server
+  git.fferrando.cc/rdfilippo/lastgasp-server:latest
 ```
+
+The image has a health check: it runs `lastgasp-server health`, which asks `/readyz` on port 8080. With another `-http` port, override it (`--health-cmd`, or `healthcheck:` in compose).
 
 Arguments after the image name replace the default flags, so give them all:
 
@@ -76,6 +100,7 @@ Helper commands run in the same image:
 docker run --rm -it lastgasp-server user alice admin               # asks for the password
 docker run --rm -i lastgasp-server user alice admin < password.txt  # reads one line
 docker run --rm lastgasp-server token grafana viewer
+docker run --rm lastgasp-server -version
 ```
 
 ## Run with Docker Compose and PostgreSQL
@@ -98,6 +123,8 @@ docker compose up -d --build
 
 Commented lines in `compose.yaml` enable alerts and login. Reload files with `docker compose kill -s HUP server`.
 
+More compose setups (Telegram, Alertmanager, HTTPS with Caddy, a full production setup) are in [examples/](../examples/README.md).
+
 ## Flags
 
 | Flag | Default | Meaning |
@@ -105,10 +132,15 @@ Commented lines in `compose.yaml` enable alerts and login. Reload files with `do
 | `-listen` | :5140 | UDP address for agent packets |
 | `-http` | :8080 | web UI, API and `/metrics` |
 | `-db` | lastgasp.db | SQLite file, or a `postgres://` URL |
-| `-key-file` | | `host hexkey` lines (required) |
+| `-key-file` | | `host hexkey` lines. Optional: without it only enrolled agents are accepted |
+| `-agent-address` | `-public-url` host, `-listen` port | `host:port` agents send to, shown in install commands |
+| `-repo-url` | https://git.fferrando.cc/rdfilippo/lastgasp | repository whose releases hold the agent and installer |
 | `-rcvbuf` | 8 MiB | UDP receive buffer. Linux caps it at `net.core.rmem_max` |
 | `-stale-after` | 30s | time without packets before a host is shown as down |
-| `-retain` | 0 | delete records, closed incidents, old boots and agent runs older than this, at least 1h. 0 keeps everything |
+| `-retain` | 0 | delete records, closed incidents, old boots, agent runs and silences older than this, at least 1h. 0 keeps everything |
+| `-retain-info` | 0 | delete records of level info and debug older than this, at least 1h. 0 uses `-retain` only |
+| `-retain-records` | 0 | keep at most this many records in total, oldest deleted first. 0 for no limit |
+| `-retain-host-records` | 0 | keep at most this many records per host, oldest deleted first. 0 for no limit |
 | `-rules` | | extra incident rules, see [incidents-and-alerts.md](incidents-and-alerts.md#rules) |
 | `-silent-after` | 2m | time without packets before a `silent` incident, 0 to disable |
 | `-crash-wait` | 2m | time after a reboot to wait for pstore lines before deciding crash or reboot |
@@ -116,17 +148,30 @@ Commented lines in `compose.yaml` enable alerts and login. Reload files with `do
 | `-incident-context` | 200 | log lines shown with an incident, 1 to 10000 |
 | `-alert-webhook` | | webhook target, repeatable |
 | `-alert-email` | | email target, repeatable |
-| `-alert-format` | json | default format: `json`, or `slack` for Slack and Mattermost |
+| `-alert-telegram` | | Telegram target, repeatable |
+| `-alert-format` | json | default webhook format: `json`, `slack` for Slack and Mattermost, or `alertmanager` for the Alertmanager v2 API |
 | `-alert-key-file` | | default hex key that signs webhook bodies |
 | `-alert-min-severity` | warning | default lowest severity: `info`, `warning` or `critical` |
 | `-alert-rate-limit` | 10m | default limit of one alert per host, incident kind and rule in this time |
 | `-public-url` | | UI address used for links in alerts |
 | `-auth-file` | | users and API tokens. Without it there is no login |
 | `-auth-metrics` | false | also require a login for `/metrics` |
+| `-session-ttl` | 168h | how long a login on the web UI lasts |
+| `-version` | | print the version and exit |
 | `-auth-proxy-header` | | header with the client address set by a reverse proxy, like `X-Forwarded-For` |
 | `-auth-trusted-proxies` | 127.0.0.1,::1 | addresses or CIDR prefixes allowed to set that header |
 
 Bad values stop the server at start with a clear message. Without `-auth-file`, the server logs a warning when `-http` is not a localhost address.
+
+## Health checks
+
+| Check | Answers |
+| --- | --- |
+| `GET /healthz` | always `ok` while the process serves HTTP. For liveness checks |
+| `GET /readyz` | `ok` when the database answers within 3 seconds, the UDP reader and the ingest worker run, and the ingest queue is below 90%. Otherwise 503 with the reason. For readiness checks and load balancers |
+| `lastgasp-server health [URL]` | exits 0 when the URL (default `http://127.0.0.1:8080/readyz`) answers 200. For images without curl |
+
+Both endpoints are open without a login.
 
 ## Database
 
@@ -145,7 +190,18 @@ The schema has a version and is upgraded on start, in a transaction, for both da
 
 ## Retention
 
-With `-retain`, a cleanup runs one minute after start and then every hour. It deletes records, closed incidents, boots and agent runs older than the limit, in batches. The newest boot of each host is always kept, so crash logs sent by the next boot still find their boot. Removed boots are remembered by name only, so a boot that sends again after its removal (a replay, or a machine with a wrong boot ID) is not taken for a new boot.
+A cleanup runs one minute after start and then every 10 minutes when at least one limit is set. All limits can be combined, and each deletes the oldest records first, in batches.
+
+| Flag | Removes | Use it for |
+| --- | --- | --- |
+| `-retain-info 72h` | info and debug lines (levels 6 and 7) older than 72 hours | the bulk of most kernel logs. Errors and warnings stay longer |
+| `-retain-host-records 500000` | the oldest records of each host above 500000 | one noisy host cannot push out the logs of the others |
+| `-retain-records 20000000` | the oldest records above 20 million, over all hosts | a hard cap that keeps the database size in check. A record takes about 300 to 500 bytes with indexes |
+| `-retain 720h` | records, closed incidents, boots, agent runs and silences older than 30 days | the general age limit |
+
+The count limits only remove records. Incidents keep their summary, but the log lines shown with an old incident may be gone.
+
+With `-retain`, the newest boot of each host is always kept, so crash logs sent by the next boot still find their boot. Removed boots are remembered by name only, so a boot that sends again after its removal (a replay, or a machine with a wrong boot ID) is not taken for a new boot.
 
 SQLite does not give space back to the file system: it reuses it for new records. To shrink the file, stop the server and run `sqlite3 lastgasp.db VACUUM`.
 

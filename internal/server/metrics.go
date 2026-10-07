@@ -1,9 +1,12 @@
 package server
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"lastgasp/internal/version"
 )
 
 // Metrics are the server side Prometheus metrics.
@@ -20,6 +23,7 @@ type Metrics struct {
 	AuthBlocked  prometheus.Counter
 	// RetentionDeleted counts rows removed by retention, per table.
 	RetentionDeleted *prometheus.CounterVec
+	Enrollments      *prometheus.CounterVec
 }
 
 func NewMetrics(reg prometheus.Registerer, tr *Tracker, staleAfter time.Duration) *Metrics {
@@ -57,8 +61,16 @@ func NewMetrics(reg prometheus.Registerer, tr *Tracker, staleAfter time.Duration
 		RetentionDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lastgasp_retention_deleted_total", Help: "Rows deleted because they are older than the retention period.",
 		}, []string{"table"}),
+		Enrollments: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lastgasp_enrollments_total", Help: "Enrollment requests by result (enrolled, bad_token, host_taken, limited, malformed, dropped).",
+		}, []string{"result"}),
 	}
-	reg.MustRegister(m.Invalid, m.Stored, m.Deduplicated, m.QueueDropped, m.Probes, m.StoreErrors, m.LostToStore, m.KeyReloads, m.AuthFailures, m.AuthBlocked, m.RetentionDeleted,
+	build := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lastgasp_build_info", Help: "Always 1, with the server version and Go version as labels.",
+	}, []string{"version", "goversion"})
+	build.WithLabelValues(version.String(), runtime.Version()).Set(1)
+	reg.MustRegister(build)
+	reg.MustRegister(m.Invalid, m.Stored, m.Deduplicated, m.QueueDropped, m.Probes, m.StoreErrors, m.LostToStore, m.KeyReloads, m.AuthFailures, m.AuthBlocked, m.RetentionDeleted, m.Enrollments,
 		&trackerCollector{tr: tr, staleAfter: staleAfter})
 	return m
 }
@@ -91,11 +103,13 @@ var (
 	descOverruns   = desc("lastgasp_agent_kmsg_overruns_total", "Times the kernel overwrote records before the agent read them.")
 	descSendErrors = desc("lastgasp_agent_send_errors_total", "Failed sends reported by the agent.")
 	descBuffered   = desc("lastgasp_agent_buffered_records", "Records waiting in the agent buffer.")
+	descAgentInfo  = prometheus.NewDesc("lastgasp_agent_info", "Always 1, with the version of the newest agent run as a label.",
+		[]string{"host", "version"}, nil)
 )
 
 func (c *trackerCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descReceived, descGaps, descRecovered, descMissing, descDuplicates,
-		descLastSeen, descUp, descDrops, descOverruns, descSendErrors, descBuffered} {
+		descLastSeen, descUp, descDrops, descOverruns, descSendErrors, descBuffered, descAgentInfo} {
 		ch <- d
 	}
 }
@@ -126,6 +140,11 @@ func (c *trackerCollector) Collect(ch chan<- prometheus.Metric) {
 		} {
 			// Never panic in a scrape: a bad label value only skips that metric.
 			if pm, err := prometheus.NewConstMetric(m.d, m.t, m.v, h.Host); err == nil {
+				ch <- pm
+			}
+		}
+		if h.AgentVersion != "" {
+			if pm, err := prometheus.NewConstMetric(descAgentInfo, gauge, 1, h.Host, h.AgentVersion); err == nil {
 				ch <- pm
 			}
 		}

@@ -80,6 +80,13 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 dialog .head button { white-space: nowrap; }
 #logs td.meta { width: 1%; }
 dialog .head { flex-wrap: wrap; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); align-items: center; }
+.actions input[type=text] { flex: 1; min-width: 12ch; }
+.ok-msg { color: var(--ok); }
+.cmd { display: flex; gap: 8px; align-items: stretch; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.cmd pre { flex: 1; margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-all; }
+.note { padding: 0 14px 10px; color: var(--muted); font-size: 13px; }
 @media (max-width: 640px) {
   header, main { padding-left: 10px; padding-right: 10px; }
   #logs td { padding: 4px 6px; }
@@ -92,12 +99,42 @@ dialog .head { flex-wrap: wrap; }
   <h1>last<span>gasp</span></h1>
   <div class="sub" id="status">loading</div>
   <div class="sub" id="who" style="margin-left:auto"></div>
+  <button id="logout" hidden title="End this login">log out</button>
 </header>
 <main>
   <section>
     <h2><span>Incidents <span class="chip" id="inc-count"></span></span>
       <label class="live chip"><input type="checkbox" id="inc-open"> open only</label></h2>
     <div class="scroll" id="incidents"></div>
+  </section>
+
+  <section>
+    <h2>Silences <span class="chip" id="sil-count"></span></h2>
+    <div class="actions" id="sil-form" hidden>
+      <input id="sil-host" type="text" list="sil-hosts" placeholder="host or pattern, like db-* or *" aria-label="host or pattern">
+      <datalist id="sil-hosts"></datalist>
+      <select id="sil-kind" aria-label="incident kind"><option value="">every kind</option></select>
+      <select id="sil-dur" aria-label="duration"><option>30m</option><option selected>1h</option><option>4h</option><option>24h</option><option>168h</option></select>
+      <input id="sil-comment" type="text" placeholder="comment, like kernel update" aria-label="comment">
+      <button id="sil-add" class="primary">add silence</button>
+    </div>
+    <div class="scroll" id="silences"></div>
+  </section>
+
+  <section id="agents-section" hidden>
+    <h2>Agents <span class="chip" id="agent-count"></span></h2>
+    <div class="actions">
+      <input id="tok-comment" type="text" placeholder="comment, like rack 4" aria-label="token comment">
+      <select id="tok-uses" aria-label="uses"><option value="1">1 agent</option><option value="10">10 agents</option><option value="0">no limit</option></select>
+      <select id="tok-ttl" aria-label="valid for"><option value="1h">for 1 hour</option><option value="24h" selected>for 24 hours</option><option value="168h">for 7 days</option></select>
+      <button id="tok-add" class="primary" title="A join token lets new agents get their own key">add agents</button>
+    </div>
+    <div id="tok-new" hidden>
+      <div class="cmd"><pre id="tok-cmd"></pre><button id="tok-copy">copy</button></div>
+      <div class="note" id="tok-note"></div>
+    </div>
+    <div class="scroll" id="tokens"></div>
+    <div class="scroll" id="agents"></div>
   </section>
 
   <section>
@@ -139,11 +176,17 @@ dialog .head { flex-wrap: wrap; }
     <button id="inc-logs" title="Show the logs of this host">show logs</button>
     <button id="inc-ack" class="primary">acknowledge</button>
     <button id="inc-close" title="Close (Escape)">close</button></div>
+  <div class="actions" id="inc-actions" hidden>
+    <input id="inc-note" type="text" maxlength="1000" placeholder="note, saved with acknowledge or resolve" aria-label="note">
+    <button id="inc-resolve" title="Close the incident as resolved and tell the targets that got an alert">resolve</button>
+    <select id="inc-sil-dur" aria-label="silence duration"><option>1h</option><option>4h</option><option>24h</option></select>
+    <button id="inc-silence" title="Hold back new alerts of this host">silence host</button>
+  </div>
   <div class="body"><div class="msg" id="inc-msg" hidden></div><div id="inc-body"></div></div>
 </dialog>
 <script>
 const LEVELS = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
-const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error"};
+const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error", server: "server"};
 const PAGE = 300;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -167,8 +210,14 @@ class HTTPError extends Error {
   constructor(status, text) { super(text || "HTTP " + status); this.status = status; }
 }
 
+// A 401 means the login ended, for example after -session-ttl, so the login page takes over.
+function toLogin() {
+  location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
+}
+
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);
+  if (r.status === 401) toLogin();
   if (!r.ok) throw new HTTPError(r.status, (await r.text()).trim());
   return r.json();
 }
@@ -233,6 +282,7 @@ function filtersChanged() {
 
 async function loadHosts() {
   const hosts = await getJSON("/api/hosts");
+  render($("sil-hosts"), hosts.map(h => `<option value="${esc(h.host)}">`).join(""));
   $("hostcount").textContent = hosts.length ? hosts.filter(h => h.up).length + " of " + hosts.length + " up" : "";
   for (const h of hosts) setHostOption(h.host);
   if (!hosts.length) return render($("hosts"), '<div class="empty">No agent has sent anything yet.</div>');
@@ -242,7 +292,8 @@ async function loadHosts() {
     <th class="num" title="Packets that never arrived">Missing</th><th class="num" title="Packets that arrived out of order or were sent again">Late</th>
     <th class="num">Duplicates</th><th class="num" title="Dropped by the agent because its buffer was full">Agent drops</th>
     <th class="num" title="Kernel overwrote records before the agent read them">Kernel overruns</th>
-    <th class="num">Send errors</th><th class="num" title="Records the agent holds until a server confirms them">Buffered</th></tr>` +
+    <th class="num">Send errors</th><th class="num" title="Records the agent holds until a server confirms them">Buffered</th>
+    <th title="Version of the newest agent run">Agent</th></tr>` +
     hosts.map(h => `<tr class="click${cur === h.host ? " sel" : ""}" tabindex="0" data-key="${esc(h.host)}"
       title="${cur === h.host ? "Show all hosts" : "Show only " + esc(h.host)}" aria-pressed="${cur === h.host}">
       <td><span class="dot ${h.up ? "up" : "down"}" title="${h.up ? "up" : "down"}"></span>${esc(h.host)}</td>
@@ -255,7 +306,9 @@ async function loadHosts() {
       <td${cls(h.agent.BufferDrops, "bad")}>${fmtNum(h.agent.BufferDrops)}</td>
       <td${cls(h.agent.KmsgOverruns, "warn")}>${fmtNum(h.agent.KmsgOverruns)}</td>
       <td${cls(h.agent.SendErrors, "warn")}>${fmtNum(h.agent.SendErrors)}</td>
-      <td class="num">${fmtNum(h.agent.Buffered)}</td></tr>`).join("") + "</table>");
+      <td class="num">${fmtNum(h.agent.Buffered)}</td>
+      <td class="muted${h.agent_version && h.agent_version !== serverVersion ? " warn" : ""}"
+        title="${h.agent_version && h.agent_version !== serverVersion ? "Not the server version " + esc(serverVersion) : ""}">${esc(h.agent_version || "old")}</td></tr>`).join("") + "</table>");
 }
 
 // Missing packets
@@ -371,7 +424,7 @@ async function loadOlder() {
 
 // Incidents
 
-const state = i => [i.closed_at ? (i.resolved ? "resolved" : "closed") : "open", i.acked_at ? "seen" : "",
+const state = i => [i.closed_at ? (i.resolved ? "resolved" : "closed") : "open", i.acked_at ? "seen" + (i.acked_by ? " by " + i.acked_by : "") : "",
   ...(i.alerts || []).map(a => a.target + " " + a.state)].filter(Boolean).map(esc).join(", ");
 
 async function loadIncidents() {
@@ -395,12 +448,131 @@ async function loadIncidents() {
       <td class="summary" title="${esc(i.summary)}">${esc(i.summary)}</td></tr>`).join("") + "</table>");
 }
 
-let shown = null, isAdmin = true;
+// Silences
+
+const postJSON = (url, body, method = "POST") =>
+  getJSON(url, {method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+
+async function loadSilences() {
+  const list = await getJSON("/api/silences");
+  const now = Date.now();
+  const active = list.filter(s => new Date(s.starts_at) <= now).length;
+  $("sil-count").textContent = list.length ? active + " active" + (list.length > active ? ", " + (list.length - active) + " upcoming" : "") : "";
+  if (!list.length) return render($("silences"), '<div class="empty">No silences. A silence holds back alerts, for example during maintenance.</div>');
+  render($("silences"), `<table><tr><th>Host</th><th>Kind</th><th>From</th><th>Until</th><th>Comment</th><th>By</th><th></th></tr>` +
+    list.map(s => `<tr><td>${esc(s.host)}</td><td>${esc(s.kind ? KINDS[s.kind] || s.kind : "every kind")}</td>
+      <td class="muted">${esc(new Date(s.starts_at).toLocaleString())}</td><td class="muted">${esc(new Date(s.ends_at).toLocaleString())}</td>
+      <td>${esc(s.comment)}</td><td class="muted">${esc(s.created_by)}</td>
+      <td>${isAdmin ? `<button data-end="${s.id}" data-key="end-${s.id}">end now</button>` : ""}</td></tr>`).join("") + "</table>");
+}
+
+async function addSilence(host, kind, duration, comment) {
+  await postJSON("/api/silences", {host, kind, duration, comment});
+  loadSilences().catch(setStatus);
+}
+
+$("sil-add").onclick = async () => {
+  const b = $("sil-add");
+  b.disabled = true;
+  try {
+    await addSilence($("sil-host").value.trim(), $("sil-kind").value, $("sil-dur").value, $("sil-comment").value.trim());
+    $("sil-host").value = $("sil-comment").value = "";
+  } catch (e) {
+    alert("Silence not added: " + e.message);
+  } finally {
+    b.disabled = false;
+  }
+};
+$("silences").onclick = async e => {
+  const b = e.target.closest("button[data-end]");
+  if (!b) return;
+  b.disabled = true;
+  try {
+    const r = await fetch("/api/silences/" + b.dataset.end, {method: "DELETE"});
+    if (!r.ok) throw new HTTPError(r.status, (await r.text()).trim());
+    loadSilences().catch(setStatus);
+  } catch (e) {
+    b.disabled = false;
+    alert("Silence not ended: " + e.message);
+  }
+};
+for (const [k, v] of Object.entries(KINDS)) $("sil-kind").add(new Option(v, k));
+
+// Agents: join tokens and enrolled hosts, for admins.
+
+async function loadAgents() {
+  if (!isAdmin) return;
+  let tokens, agents;
+  try {
+    [tokens, agents] = await Promise.all([getJSON("/api/enroll-tokens"), getJSON("/api/agents")]);
+  } catch (e) {
+    // A viewer, before /api/me said so.
+    if (e.status === 403) { $("agents-section").hidden = true; return; }
+    throw e;
+  }
+  const now = Date.now();
+  const usable = t => !t.revoked && t.uses_left !== 0 && new Date(t.expires_at) > now;
+  $("agent-count").textContent = agents.length + " enrolled" + (tokens.filter(usable).length ? ", " + tokens.filter(usable).length + " usable tokens" : "");
+  const shownTokens = tokens.filter(t => usable(t) || now - new Date(t.expires_at) < 864e5);
+  render($("tokens"), shownTokens.length ? `<table><tr><th>Join token</th><th>Comment</th><th class="num">Used</th><th>Uses left</th>
+    <th>Valid until</th><th>By</th><th></th></tr>` + shownTokens.map(t => `<tr${usable(t) ? "" : ' class="closed"'}>
+      <td class="muted">#${t.id}${t.revoked ? " (revoked)" : ""}</td><td>${esc(t.comment)}</td><td class="num">${t.used}</td>
+      <td>${t.uses_left < 0 ? "no limit" : t.uses_left}</td><td class="muted">${esc(new Date(t.expires_at).toLocaleString())}</td>
+      <td class="muted">${esc(t.created_by)}</td>
+      <td>${usable(t) ? `<button data-revoke-token="${t.id}" data-key="tok-${t.id}">revoke</button>` : ""}</td></tr>`).join("") + "</table>" : "");
+  render($("agents"), agents.length ? `<table><tr><th>Enrolled host</th><th>Enrolled</th><th>From</th><th class="num">Token</th><th></th></tr>` +
+    agents.map(a => `<tr><td>${esc(a.host)}</td>${age(a.enrolled_at)}<td class="muted">${esc(a.from)}</td>
+      <td class="num muted">#${a.token_id}</td>
+      <td><button data-revoke-agent="${esc(a.host)}" data-key="agent-${esc(a.host)}" title="Refuse packets with this key">revoke key</button></td></tr>`).join("") + "</table>"
+    : '<div class="empty">No agent enrolled yet. "add agents" makes a join token and the command that installs an agent with it.</div>');
+}
+
+$("tok-add").onclick = async () => {
+  const b = $("tok-add");
+  b.disabled = true;
+  try {
+    const r = await postJSON("/api/enroll-tokens", {comment: $("tok-comment").value.trim(), uses: +$("tok-uses").value, ttl: $("tok-ttl").value});
+    $("tok-cmd").textContent = r.install;
+    $("tok-note").textContent = "Run it as root on each new host. The token is shown only now" +
+      (r.agent_address ? "." : ". Replace SERVER:5140 with the address agents reach the server on, or start the server with -agent-address.");
+    $("tok-new").hidden = false;
+    $("tok-comment").value = "";
+    loadAgents().catch(setStatus);
+  } catch (e) {
+    alert("Token not created: " + e.message);
+  } finally {
+    b.disabled = false;
+  }
+};
+$("tok-copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("tok-cmd").textContent); $("tok-copy").textContent = "copied"; }
+  catch { $("tok-copy").textContent = "copy failed"; }
+  setTimeout(() => { $("tok-copy").textContent = "copy"; }, 1500);
+};
+$("agents-section").onclick = async e => {
+  const tb = e.target.closest("button[data-revoke-token]"), ab = e.target.closest("button[data-revoke-agent]");
+  if (!tb && !ab) return;
+  if (ab && !confirm("Revoke the key of " + ab.dataset.revokeAgent + "? Its packets are refused until it enrolls again.")) return;
+  const url = tb ? "/api/enroll-tokens/" + tb.dataset.revokeToken : "/api/agents/" + encodeURIComponent(ab.dataset.revokeAgent);
+  try {
+    const r = await fetch(url, {method: "DELETE"});
+    if (!r.ok) throw new HTTPError(r.status, (await r.text()).trim());
+    loadAgents().catch(setStatus);
+  } catch (err) {
+    alert("Not revoked: " + err.message);
+  }
+};
+
+let shown = null, isAdmin = true, serverVersion = "";
 
 async function loadMe() {
   const me = await getJSON("/api/me");
   isAdmin = me.role === "admin";
-  $("who").textContent = me.auth ? me.user + " (" + me.role + ")" : "";
+  serverVersion = me.version;
+  $("sil-form").hidden = !isAdmin;
+  $("agents-section").hidden = !isAdmin;
+  $("who").textContent = (me.auth ? me.user + " (" + me.role + "), " : "") + "server " + me.version;
+  $("logout").hidden = !me.session;
 }
 
 function incidentMsg(text) {
@@ -409,6 +581,14 @@ function incidentMsg(text) {
 }
 
 function setAckButton(i) {
+  $("inc-actions").hidden = !isAdmin || !i;
+  if (i) {
+    $("inc-resolve").disabled = i.resolved || (!i.closed_at && (i.kind === "reboot" || i.kind === "silent"));
+    $("inc-resolve").title = i.resolved ? "Already resolved" : !i.closed_at && i.kind === "reboot" ? "Waiting for the crash check" :
+      !i.closed_at && i.kind === "silent" ? "Closes when the host sends again, use a silence instead" :
+      "Close the incident as resolved and tell the targets that got an alert";
+    $("inc-silence").disabled = i.host === "@server";
+  }
   const b = $("inc-ack");
   b.hidden = !isAdmin || !i;
   b.disabled = !i || !!i.acked_at;
@@ -422,6 +602,7 @@ async function showIncident(id) {
     $("inc-title").textContent = "Incident " + id;
     $("inc-body").innerHTML = '<div class="empty">loading</div>';
     for (const b of ["inc-copy", "inc-logs"]) $(b).disabled = true;
+    $("inc-note").value = "";
     setAckButton(null);
     incidentMsg("");
     if (!$("inc-dialog").open) $("inc-dialog").showModal();
@@ -446,6 +627,7 @@ async function showIncident(id) {
   $("inc-body").innerHTML = `<h4>Summary</h4><pre>${esc(i.summary)}</pre>
     <h4>Details</h4><div class="muted">boot ${esc(i.boot_id)}, opened ${esc(new Date(i.opened_at).toLocaleString())}${i.closed_at ?
       ", closed " + esc(new Date(i.closed_at).toLocaleString()) : ", still open"}, count ${fmtNum(i.count)}<br>${state(i)}</div>` +
+    (i.note ? `<h4>Note</h4><pre>${esc(i.note)}</pre>` : "") +
     (v.pstore.length ? `<h4>Saved by the kernel before the reboot (pstore, ${fmtNum(v.pstore.length)} lines)</h4><pre>${block(v.pstore)}</pre>` : "") +
     `<h4>Last kernel lines received (${fmtNum(v.records.length)})</h4>` +
     (v.records.length ? `<pre id="inc-tail">${block(v.records)}</pre>` : '<div class="empty">No lines received for this boot.</div>');
@@ -463,6 +645,10 @@ function route() {
   else closeIncident();
 }
 
+$("logout").onclick = async () => {
+  await fetch("/api/logout", {method: "POST"}).catch(() => {});
+  location.href = "/login";
+};
 $("inc-close").onclick = closeIncident;
 $("inc-dialog").onclose = () => {
   shown = null;
@@ -480,12 +666,40 @@ $("inc-ack").onclick = async () => {
   b.textContent = "saving...";
   incidentMsg("");
   try {
-    const i = await getJSON("/api/incidents/" + id + "/ack", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
-    if (shown && shown.id === id) { shown = i; setAckButton(i); }
+    const i = await postJSON("/api/incidents/" + id + "/ack", {note: $("inc-note").value.trim()});
+    if (shown && shown.id === id) { $("inc-note").value = ""; showIncident(id); }
     loadIncidents().catch(() => {});
   } catch (e) {
     setAckButton(shown);
     incidentMsg(e.status === 403 ? "Only admins can acknowledge incidents." : "Not acknowledged: " + e.message);
+  }
+};
+$("inc-resolve").onclick = async () => {
+  if (!shown) return;
+  const id = shown.id;
+  $("inc-resolve").disabled = true;
+  incidentMsg("");
+  try {
+    await postJSON("/api/incidents/" + id + "/resolve", {note: $("inc-note").value.trim()});
+    if (shown && shown.id === id) { $("inc-note").value = ""; showIncident(id); }
+    loadIncidents().catch(() => {});
+  } catch (e) {
+    setAckButton(shown);
+    incidentMsg("Not resolved: " + e.message);
+  }
+};
+$("inc-silence").onclick = async () => {
+  if (!shown) return;
+  const b = $("inc-silence"), dur = $("inc-sil-dur").value;
+  b.disabled = true;
+  incidentMsg("");
+  try {
+    await addSilence(shown.host, "", dur, $("inc-note").value.trim() || "from incident " + shown.id);
+    b.textContent = "silenced for " + dur;
+    setTimeout(() => { b.textContent = "silence host"; b.disabled = false; }, 2000);
+  } catch (e) {
+    b.disabled = false;
+    incidentMsg("Not silenced: " + e.message);
   }
 };
 $("inc-copy").onclick = async () => {
@@ -546,7 +760,7 @@ async function refresh() {
   running = true;
   again = false;
   try {
-    await Promise.all([loadIncidents(), loadHosts(), loadGaps(), pollLogs()]);
+    await Promise.all([loadIncidents(), loadSilences(), loadAgents(), loadHosts(), loadGaps(), pollLogs()]);
     setStatus(null);
   } catch (e) {
     setStatus(e);

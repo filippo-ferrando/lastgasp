@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"lastgasp/internal/version"
 	"lastgasp/internal/wire"
 )
 
@@ -30,6 +31,9 @@ type Config struct {
 	WaitAck       bool
 	ResolveEvery  time.Duration
 	MaxPstoreFile int64
+	// StashPath is a file on tmpfs that keeps unconfirmed records across agent restarts, empty to disable.
+	StashPath string
+	StashSize int
 }
 
 // MaxBuffer bounds -buffer, as all slots are allocated and locked in memory at start.
@@ -54,6 +58,8 @@ func (c *Config) Validate() error {
 		return errors.New("wait-ack needs heartbeats, set -heartbeat or -wait-ack=false")
 	case c.ResolveEvery < time.Second:
 		return errors.New("resolve-every must be at least 1s")
+	case c.StashPath != "" && (c.StashSize < MinStash || c.StashSize > MaxStash):
+		return fmt.Errorf("stash-size must be between %d and %d bytes", MinStash, MaxStash)
 	}
 	for _, s := range c.Servers {
 		if _, _, err := net.SplitHostPort(s); err != nil {
@@ -76,6 +82,7 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	}
 	stats := &Stats{}
 	queue := NewQueue(cfg.BufferSize)
+	bootID := ReadBootID(cfg.BootIDPath, log)
 	maxMsg := wire.MaxMsg(len(cfg.Host))
 
 	split := func(kind wire.Kind, e Entry, seq, fileID uint64) []Item {
@@ -96,24 +103,45 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 
 	// pstore holds the crash of the previous boot. It gets its own queue, sized to hold every line
 	// and sent first, so the kernel buffer replay can never push it out.
-	var pstoreQueue *Queue
+	var items []Item
 	if cfg.PstoreDir != "" {
 		lines, err := ReadPstore(cfg.PstoreDir, cfg.MaxPstoreFile)
 		if err != nil && !os.IsNotExist(err) {
 			log.Printf("pstore: %v", err)
 		}
-		var items []Item
 		for _, l := range lines {
 			items = append(items, split(wire.KindPstore, l.Entry, l.Line, l.FileID)...)
 			stats.PstoreRecords.Add(1)
 		}
-		if len(items) > 0 {
-			pstoreQueue = NewQueue(len(items))
-			for _, it := range items {
-				pstoreQueue.Push(it)
-			}
+		if len(lines) > 0 {
 			log.Printf("pstore: queued %d lines from the previous boot", len(lines))
 		}
+	}
+	// Records the previous run of this boot did not get confirmed go in the same first queue.
+	var stash *Stash
+	if cfg.StashPath != "" {
+		var recovered []Item
+		var err error
+		if stash, recovered, err = OpenStash(cfg.StashPath, cfg.StashSize, bootID, log); err != nil {
+			log.Printf("stash: %v, records are not kept across restarts", err)
+		} else if len(recovered) > 0 {
+			log.Printf("stash: %d records from the previous run will be sent again", len(recovered))
+			items = append(items, recovered...)
+		}
+	}
+	var first *Queue
+	if len(items) > 0 {
+		first = NewQueue(len(items))
+		if stash != nil {
+			first.Mirror(stash, tagFirst)
+		}
+		for _, it := range items {
+			first.Push(it)
+		}
+	}
+	// The stash is never unmapped: the kmsg reader may still push records while the process exits.
+	if stash != nil {
+		queue.Mirror(stash, tagMain)
 	}
 
 	c, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -123,9 +151,9 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	cancel()
 
 	sender := &Sender{
-		Host: cfg.Host, BootID: ReadBootID(cfg.BootIDPath, log), Instance: randomUint64(),
-		Key: cfg.Key, Queue: queue, Pstore: pstoreQueue, Resolver: res, Stats: stats, Log: log,
-		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck,
+		Host: cfg.Host, BootID: bootID, Instance: randomUint64(),
+		Key: cfg.Key, Queue: queue, First: first, Resolver: res, Stats: stats, Log: log,
+		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck, Version: version.String(),
 	}
 	kmsg := &KmsgReader{Path: cfg.KmsgPath, Stats: stats, Log: log,
 		OnEntry: func(e Entry) {
@@ -136,7 +164,7 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 			}
 		}}
 
-	log.Printf("agent: host=%s boot=%s instance=%x servers=%s",
+	log.Printf("agent: version=%s host=%s boot=%s instance=%x servers=%s", version.String(),
 		cfg.Host, wire.FormatBootID(sender.BootID), sender.Instance, strings.Join(cfg.Servers, ","))
 
 	workers := map[string]func(context.Context){

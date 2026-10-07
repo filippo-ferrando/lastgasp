@@ -4,13 +4,14 @@ lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last l
 
 | Page | Content |
 | --- | --- |
-| [Getting started](getting-started.md) | build, first server, first agent, check that logs arrive |
+| [Getting started](getting-started.md) | first server, first agent in one line, check that logs arrive |
 | [How it works](how-it-works.md) | agent and server design, packets, acks, missing packets, deduplication |
-| [Agent](agent.md) | install script, flags, systemd unit, sizing, troubleshooting |
-| [Server](server.md) | binary, systemd, Docker, database, retention, reload, reverse proxy |
+| [Agent](agent.md) | one line install, enrollment, install script, flags, systemd unit, stash, sizing, troubleshooting |
+| [Server](server.md) | keys and enrollment, binary, systemd, Docker, health checks, database, retention, reload, reverse proxy |
 | [Incidents and alerts](incidents-and-alerts.md) | incident kinds, rules, webhooks, email, testing incidents |
-| [Web UI and API](web-ui-and-api.md) | login, roles, JSON API with examples, Prometheus metrics |
+| [Web UI and API](web-ui-and-api.md) | login and sessions, roles, JSON API with examples, Prometheus metrics |
 | [Operations](operations.md) | production checklist, monitoring, backups, upgrades, troubleshooting, limits |
+| [Releasing](releasing.md) | CI, release files, server image, secrets |
 | [Open work](open-work.md) | ideas not done yet |
 
 ## Words used in these pages
@@ -26,4 +27,6 @@ lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last l
 | sequence number | a counter in every packet of an agent run, used to find missing packets |
 | ack | the answer of the server to an agent heartbeat. It says which packets arrived, so the agent can send lost ones again |
 | incident | something worth a look: a crash, a reboot, a silent host or a kernel error |
-| target | where alerts go: a webhook or an email address list |
+| target | where alerts go: a webhook, Alertmanager, Telegram or an email address list |
+| join token | a secret made in the web UI that lets new agents enroll |
+| enrollment | an agent getting its own key from the server with a join token |

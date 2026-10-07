@@ -299,3 +299,33 @@ func TestHeartbeatCarriesOldest(t *testing.T) {
 		t.Fatalf("got %+v err %v", got, err)
 	}
 }
+
+func TestHeartbeatCarriesAgentVersion(t *testing.T) {
+	p := samplePacket()
+	p.Kind, p.Record, p.AgentVersion = KindHeartbeat, Record{}, "v1.4.0"
+	b, _ := Encode(p, testKey)
+	got, err := Decode(b, keyFor)
+	if err != nil || got.Version != 4 || got.AgentVersion != "v1.4.0" {
+		t.Fatalf("got %+v err %v", got, err)
+	}
+	// A version 3 agent gets a version 3 ack, which it can read.
+	p.Version, p.AgentVersion = 3, "ignored"
+	b, _ = Encode(p, testKey)
+	got, err = Decode(b, keyFor)
+	if err != nil || got.Version != 3 || got.AgentVersion != "" {
+		t.Fatalf("v3 got %+v err %v", got, err)
+	}
+	ack, err := EncodeAck(got, 7, nil, testKey)
+	if err != nil || ack[4] != 3 {
+		t.Fatalf("ack version %d err %v", ack[4], err)
+	}
+	if a, err := DecodeAck(ack, testKey, p.Host, p.BootID, p.Instance); err != nil || a.Upto != 7 {
+		t.Fatalf("ack %+v err %v", a, err)
+	}
+	// A long version is cut, so the heartbeat always fits.
+	p.Version, p.AgentVersion = 0, strings.Repeat("x", 300)
+	b, _ = Encode(p, testKey)
+	if got, err := Decode(b, keyFor); err != nil || len(got.AgentVersion) != MaxAgentVersion {
+		t.Fatalf("long version: %v %d", err, len(got.AgentVersion))
+	}
+}

@@ -3,6 +3,10 @@
 # Set ROOT to install into another directory tree (used by tests, skips systemctl).
 set -eu
 
+# A release sets VERSION, so the script installs the agent of its own release.
+VERSION=@VERSION@
+case $VERSION in @*) VERSION= ;; esac
+REPO_URL=${LASTGASP_REPO:-https://git.fferrando.cc/rdfilippo/lastgasp}
 ROOT=${ROOT:-}
 BIN_DIR=/usr/local/sbin
 CONF_DIR=/etc/lastgasp
@@ -18,10 +22,13 @@ Usage:
 
 Options:
   -s, --server LIST    servers the agent sends to (required to install)
+  -t, --token TOKEN    join token from the server web UI: the agent enrolls and gets its own key
   -k, --key HEX        agent key in hex (at least 32 characters)
       --key-file PATH  read the agent key from a file
   -n, --hostname NAME  name sent to the server (default: kernel hostname)
-  -b, --binary PATH    agent binary (default: bin/lastgasp-agent or ./lastgasp-agent)
+  -b, --binary PATH    agent binary (default: bin/lastgasp-agent or ./lastgasp-agent, else downloaded)
+  -V, --version TAG    release to download, like v1.2.0 (default: ${VERSION:-the newest release})
+      --repo URL       repository with the releases (default: $REPO_URL)
   -a, --args "FLAGS"   extra agent flags, for example "-dns 10.0.0.53:53 -buffer 32768"
       --no-start       install and enable, but do not start or restart now
       --no-systemd     only copy files, do not call systemctl
@@ -29,18 +36,21 @@ Options:
       --purge          with --uninstall, also remove $CONF_DIR (the key)
   -h, --help           show this help
 
-Without --key or --key-file, an existing key is kept, or a new one is created.
+Without --token, --key or --key-file, an existing key is kept, or a new one is created.
 EOF
 }
 
 die() { echo "install-agent: $*" >&2; exit 1; }
 log() { echo "install-agent: $*"; }
 
-servers="" key="" key_file="" host="" binary="" extra=""
+servers="" key="" key_file="" host="" binary="" extra="" token="" want_version=""
 start=1 systemd=1 uninstall=0 purge=0
 while [ $# -gt 0 ]; do
 	case $1 in
 	-s|--server) servers=${2:?}; shift ;;
+	-t|--token) token=${2:?}; shift ;;
+	-V|--version) want_version=${2:?}; shift ;;
+	--repo) REPO_URL=${2:?}; shift ;;
 	-k|--key) key=${2:?}; shift ;;
 	--key-file) key_file=${2:?}; shift ;;
 	-n|--hostname) host=${2:?}; shift ;;
@@ -70,6 +80,8 @@ if [ "$uninstall" = 1 ]; then
 	fi
 	rm -f "$ROOT$UNIT_DIR/$UNIT" "$ROOT$BIN_DIR/lastgasp-agent"
 	rm -rf "$ROOT$UNIT_DIR/$UNIT.d"
+	# The stash only holds records the agent could not send yet, it is useless without the agent.
+	rm -rf "$ROOT/run/lastgasp"
 	[ "$purge" = 1 ] && rm -rf "$ROOT$CONF_DIR"
 	[ "$systemd" = 1 ] && systemctl daemon-reload
 	log "removed"
@@ -90,10 +102,69 @@ if [ -n "$host" ]; then
 	[ ${#host} -le 255 ] || die "hostname longer than 255 characters"
 fi
 
-if [ -z "$binary" ]; then
+if [ -n "$token" ]; then
+	[ -z "$key" ] && [ -z "$key_file" ] || die "--token cannot be used with --key or --key-file"
+	case $token in *[!A-Za-z0-9_-]*) die "token has invalid characters" ;; esac
+fi
+case $REPO_URL in http://*|https://*) ;; *) die "--repo must be an http or https URL" ;; esac
+case $want_version in *[!A-Za-z0-9._-]*) die "version has invalid characters" ;; esac
+
+fetch() {
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL --retry 3 -o "$2" "$1"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -O "$2" "$1"
+	else
+		die "curl or wget is needed to download the agent"
+	fi
+}
+
+# download gets the agent and its unit from a release, checked against the release checksums.
+download() {
+	case $(uname -m) in
+	x86_64|amd64) arch=amd64 ;;
+	aarch64|arm64) arch=arm64 ;;
+	armv7*|armv6*) arch=arm ;;
+	*) die "no agent build for $(uname -m), build it with 'make agent' and use --binary" ;;
+	esac
+	tag=${want_version:-$VERSION}
+	if [ -z "$tag" ]; then
+		# The Forgejo API names the newest release.
+		base=${REPO_URL%/*/*}
+		fetch "$base/api/v1/repos/${REPO_URL#"$base"/}/releases/latest" "$DL/latest.json" || die "cannot find the newest release at $REPO_URL"
+		tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DL/latest.json")
+		[ -n "$tag" ] || die "no release found at $REPO_URL"
+	fi
+	url="$REPO_URL/releases/download/$tag"
+	log "downloading lastgasp-agent $tag for linux/$arch"
+	fetch "$url/lastgasp-agent-linux-$arch" "$DL/lastgasp-agent-linux-$arch" || die "download failed: $url/lastgasp-agent-linux-$arch"
+	fetch "$url/$UNIT" "$DL/$UNIT" || die "download failed: $url/$UNIT"
+	fetch "$url/SHA256SUMS" "$DL/SHA256SUMS" || die "download failed: $url/SHA256SUMS"
+	if command -v sha256sum >/dev/null 2>&1; then
+		(cd "$DL" && grep -E " [*]?(lastgasp-agent-linux-$arch|$UNIT)\$" SHA256SUMS | sha256sum -c - >/dev/null 2>&1) ||
+			die "checksum mismatch, the download is damaged or was changed"
+	else
+		log "warning: sha256sum not found, the download is not checked"
+	fi
+	binary="$DL/lastgasp-agent-linux-$arch"
+	chmod 755 "$binary"
+	unit_src="$DL/$UNIT"
+}
+
+DL=$(mktemp -d)
+trap 'rm -rf "$DL"' EXIT
+unit_src="$SCRIPT_DIR/$UNIT"
+# A local build is used when there is one, unless a release was asked for or this script comes from one.
+if [ -z "$binary" ] && [ -z "$want_version" ] && [ -z "$VERSION" ]; then
 	for b in "$SCRIPT_DIR/../bin/lastgasp-agent" "$SCRIPT_DIR/lastgasp-agent" ./lastgasp-agent; do
 		[ -f "$b" ] && { binary=$b; break; }
 	done
+fi
+if [ -z "$binary" ] || [ ! -f "$unit_src" ]; then
+	[ -n "$binary" ] && [ ! -f "$binary" ] && die "agent binary not found: $binary"
+	given=$binary
+	download
+	if [ -n "$given" ]; then binary=$given; fi
 fi
 [ -n "$binary" ] && [ -f "$binary" ] || die "agent binary not found, run 'make agent' or use --binary"
 # A binary for the wrong CPU fails here instead of in the service.
@@ -113,7 +184,11 @@ umask 077
 mkdir -p "$ROOT$CONF_DIR" "$ROOT$BIN_DIR" "$ROOT$UNIT_DIR/$UNIT.d"
 chmod 700 "$ROOT$CONF_DIR"
 new_key=0
-if [ -n "$key" ]; then
+if [ -n "$token" ]; then
+	# The agent gets its key from the server, so nobody copies keys around.
+	"$binary" enroll -server "$servers" -token "$token" ${host:+-hostname "$host"} -key-file "$ROOT$CONF_DIR/agent.key" ||
+		die "enrollment failed, the agent was not installed"
+elif [ -n "$key" ]; then
 	echo "$key" > "$ROOT$CONF_DIR/agent.key"
 elif [ ! -s "$ROOT$CONF_DIR/agent.key" ]; then
 	od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$ROOT$CONF_DIR/agent.key"
@@ -127,7 +202,7 @@ umask 022
 cp "$binary" "$ROOT$BIN_DIR/.lastgasp-agent.new"
 chmod 755 "$ROOT$BIN_DIR/.lastgasp-agent.new"
 mv -f "$ROOT$BIN_DIR/.lastgasp-agent.new" "$ROOT$BIN_DIR/lastgasp-agent"
-cp "$SCRIPT_DIR/$UNIT" "$ROOT$UNIT_DIR/$UNIT"
+cp "$unit_src" "$ROOT$UNIT_DIR/$UNIT"
 chmod 644 "$ROOT$UNIT_DIR/$UNIT"
 
 # The flags live in a drop-in, not an EnvironmentFile: systemd keeps it in memory,

@@ -1,0 +1,30 @@
+# lastgasp-server with a SQLite database in a named volume. The simplest setup: agents enroll
+# with a join token, so there is no key file to manage.
+#
+#   echo "LASTGASP_AGENT_ADDRESS=10.0.0.5:5140" > .env    # where agents reach this machine
+#   docker compose up -d
+#
+# Open http://127.0.0.1:8080, click "add agents" and run the command it shows on each machine.
+
+services:
+  server:
+    # Or build from this checkout: replace the image line with "build: ../.."
+    image: git.fferrando.cc/rdfilippo/lastgasp-server:latest
+    restart: unless-stopped
+    # Time to store queued packets and save state on stop.
+    stop_grace_period: 30s
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=/var/lib/lastgasp/lastgasp.db
+      - -retain=720h
+      - -agent-address=${LASTGASP_AGENT_ADDRESS:?set LASTGASP_AGENT_ADDRESS in .env}
+    volumes:
+      - data:/var/lib/lastgasp
+    ports:
+      - "5140:5140/udp"
+      # No login in this example, so the UI only listens on localhost.
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  data:

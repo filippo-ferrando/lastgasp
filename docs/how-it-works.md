@@ -30,6 +30,7 @@ The agent assumes the machine can fail in every way while it runs. Its job is to
 | Out of memory | `oom_score_adj` is -1000 and a Go memory limit is set. |
 | journald dies or hangs | `SIGPIPE` is ignored and log lines are dropped instead of blocking. |
 | Internal bug | Each worker restarts after a panic. systemd restarts the process. The encryption state is kept across a restart, so no nonce is used twice. |
+| Agent restart or upgrade | Every queued record is also copied to a ring in a tmpfs file (`-stash`). A new run of the same boot sends the records the old run had not got confirmed. See [the stash](agent.md#the-stash). |
 | Crash and reboot | On start, pstore files (logs the kernel saved before the crash) are read and sent first, from a queue of their own, so a full buffer never drops them. The whole kernel buffer is replayed too. The server removes what it already has. |
 | Shutdown | On `SIGTERM` the agent sends what is left in its buffer for up to 2 seconds. |
 | One server down | Several servers can be given with `-server a:5140,b:5140`. Every packet goes to all of them. |
@@ -37,7 +38,7 @@ The agent assumes the machine can fail in every way while it runs. Its job is to
 The agent has three workers, each restarted on panic:
 
 - **kmsg reader**: reads `/dev/kmsg` one record at a time and splits long messages into parts that fit one packet.
-- **sender**: takes records from the pstore queue first, then from the ring buffer, encrypts and sends them, paced by `-rate`. Records to send again go before new ones. It sends a heartbeat every `-heartbeat`, and earlier when half the buffer waits for a server to confirm it.
+- **sender**: takes records from the first queue (pstore lines and records from the stash) first, then from the ring buffer, encrypts and sends them, paced by `-rate`. Records to send again go before new ones. It sends a heartbeat every `-heartbeat`, and earlier when half the buffer waits for a server to confirm it.
 - **resolver**: refreshes server addresses every `-resolve-every`.
 
 ## Packets
@@ -46,13 +47,34 @@ Each datagram holds one record, one heartbeat or one ack. It stays under 1400 by
 
 | Part | Clear or encrypted | Content |
 | --- | --- | --- |
-| header | clear, authenticated | magic `LGP1`, version 3, host name, boot ID, instance ID, nonce counter |
-| body | encrypted | kind, sequence number, send time, then the record (priority, kmsg sequence or pstore line, timestamp, pstore file ID, part, parts, text) or the heartbeat counters and the oldest sequence number the agent can still send again |
+| header | clear, authenticated | magic `LGP1`, version 4, host name, boot ID, instance ID, nonce counter |
+| body | encrypted | kind, sequence number, send time, then the record (priority, kmsg sequence or pstore line, timestamp, pstore file ID, part, parts, text) or the heartbeat counters, the oldest sequence number the agent can still send again, and the agent version |
 | tag | | 16 byte GCM tag |
 
 Only the host name, boot ID, instance ID and nonce counter travel in clear text, because the server needs them to pick the key. The key of each agent run is derived from the shared key with HKDF-SHA256 over the boot ID and the instance ID. Every packet uses a new nonce from a counter, so a nonce is never used twice with the same derived key. A changed header makes the packet fail.
 
-Version 2 packets (heartbeats without the oldest sequence number, acks without the receive state) are still accepted, so agents can be upgraded after the server. Version 1 packets (HMAC only, no encryption) are refused and counted as `version`.
+Version 2 and 3 packets are still accepted, so agents can be upgraded after the server: version 3 heartbeats have no agent version, version 2 heartbeats also lack the oldest sequence number. Each ack has the version of the heartbeat it answers, so an older agent can read it. Version 1 packets (HMAC only, no encryption) are refused and counted as `version`.
+
+## Enrollment
+
+An agent can get its key from the server instead of a key file, with a join token made in the web UI. Enrollment packets use the same UDP port with their own magic, `LGE1`, and no encryption: they only carry public values.
+
+The token itself never travels. Both sides use its SHA-256, which is also all the server keeps of it.
+
+1. The agent makes an X25519 key pair and sends its host name, its public key and a proof: an HMAC of the host name and the public key, keyed with the token hash.
+2. The server finds the usable token (not expired, not revoked, uses left) whose hash gives the same proof, makes its own X25519 key pair and computes the shared secret.
+3. Both sides derive the agent key: HKDF-SHA256 over the shared secret, with the token hash as salt and the host name in the label. The server counts one use of the token, saves the key, and answers with its public key and an HMAC of the host name made with the new key.
+4. The agent derives the same key, checks the HMAC, and saves the key to `/etc/lastgasp/agent.key`.
+
+| Someone who | Gets |
+| --- | --- |
+| watches the network | two public keys and a proof. Not the key, not the token |
+| replays a request | the same answer, useless without the private key of the agent |
+| changes the agent public key on the way | a proof that does not match, so the request is refused |
+| changes the server answer on the way | an answer the agent refuses: the check needs the token hash |
+| guesses tokens | 128 random bits, a few tries per second, and 10 minutes of silence after 10 wrong ones |
+
+The agent sends its request again every second until an answer comes. The server answers a repeated request with the same reply, without using the token again. A wrong token gets a short refusal, so the installer can say what went wrong.
 
 ## Sequence numbers
 
@@ -89,7 +111,8 @@ So records sent in the 15 seconds before the agent notices a dead server are not
 2. Valid packets go into a queue of 65536 packets. When the queue is full, packets are dropped and counted (`lastgasp_server_queue_dropped_total`).
 3. A worker takes packets in batches of up to 512, updates the gap tracker, saves new boots and writes the records in one transaction. A failed write is retried 5 times with backoff. Then the heartbeats of the batch get their ack.
 4. The incident detector looks at every stored kernel line, at new boots and at hosts that stopped sending. Its slow queries (the crash check, the last line of a silent host) run without its lock, so the worker never waits for them.
-5. Alert targets send incidents to webhooks and email, each with its own state and retries.
+5. Alert targets send incidents to webhooks, Telegram, Alertmanager and email, each with its own state and retries. Silences hold back alerts of matching incidents.
+6. A self check looks at the server counters every 10 seconds and opens a `server` incident when the database fails, packets are dropped, alerts fail, or packets come with an unknown host or a wrong key.
 
 On stop the server closes the UDP socket, finishes HTTP requests, writes every queued packet in full batches, saves the gap state and the incident changes, then closes the database.
 
@@ -113,7 +136,7 @@ The same line can arrive more than once: an agent restart replays the kernel buf
 
 | Case | Key |
 | --- | --- |
-| Agent restart replays the kernel buffer | host, boot ID, kmsg sequence number, part |
+| Agent restart replays the kernel buffer, or sends records from the stash | host, boot ID, kmsg sequence number, part |
 | pstore line that also arrived through kmsg before the crash | host, previous boot ID, timestamp, message, part |
 | Same pstore file sent again after later reboots | host, file content hash, line number, part |
 

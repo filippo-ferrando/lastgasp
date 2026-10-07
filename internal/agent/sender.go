@@ -24,7 +24,7 @@ type Sender struct {
 	Instance  uint64
 	Key       []byte
 	Queue     *Queue
-	Pstore    *Queue // sent before Queue, may be nil
+	First     *Queue // pstore lines and records of the previous run, sent before Queue, may be nil
 	Resolver  interface{ Addrs() []*net.UDPAddr }
 	Stats     *Stats
 	Log       *Logger
@@ -32,6 +32,7 @@ type Sender struct {
 	Heartbeat time.Duration // interval between heartbeats
 	// WaitAck holds records until a server answers a heartbeat, so nothing is sent while no server listens.
 	WaitAck bool
+	Version string // agent version sent in heartbeats
 
 	newConn func() (packetConn, error)
 	conn    packetConn
@@ -152,7 +153,7 @@ func (s *Sender) readAcks(c packetConn) {
 			continue
 		}
 		if ack.Upto > 0 {
-			for _, q := range []*Queue{s.Pstore, s.Queue} {
+			for _, q := range []*Queue{s.First, s.Queue} {
 				if q != nil {
 					q.Ack(ack.Upto, ack.Missing, tx)
 				}
@@ -182,7 +183,8 @@ func (s *Sender) Run(ctx context.Context) {
 		s.logState(ready)
 		if s.Heartbeat > 0 && (!time.Now().Before(nextBeat) || (ready && s.needConfirm() && time.Since(lastBeat) >= earlyBeat)) {
 			// A failed heartbeat is not retried: the next one carries newer counters.
-			beat := &wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start)), Oldest: s.oldest()}
+			beat := &wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start)), Oldest: s.oldest(),
+				AgentVersion: s.Version}
 			if ready {
 				s.send(beat)
 				nextBeat = time.Now().Add(s.Heartbeat)
@@ -247,11 +249,11 @@ func (s *Sender) drain() {
 	}
 }
 
-// next picks the next record to send, pstore lines first.
+// next picks the next record to send, the first queue before the kmsg queue.
 func (s *Sender) next() (*Queue, Item, bool) {
-	if s.Pstore != nil {
-		if it, ok := s.Pstore.Next(); ok {
-			return s.Pstore, it, true
+	if s.First != nil {
+		if it, ok := s.First.Next(); ok {
+			return s.First, it, true
 		}
 	}
 	it, ok := s.Queue.Next()
@@ -278,7 +280,7 @@ func (s *Sender) sendItem(q *Queue, it Item) error {
 // oldest returns the lowest seq the agent can still send again. Packets below it are never sent again.
 func (s *Sender) oldest() uint64 {
 	o := s.seq + 1
-	for _, q := range []*Queue{s.Pstore, s.Queue} {
+	for _, q := range []*Queue{s.First, s.Queue} {
 		if q == nil {
 			continue
 		}
@@ -296,8 +298,8 @@ func (s *Sender) needConfirm() bool {
 
 func (s *Sender) buffered() int {
 	n := s.Queue.Len()
-	if s.Pstore != nil {
-		n += s.Pstore.Len()
+	if s.First != nil {
+		n += s.First.Len()
 	}
 	return n
 }

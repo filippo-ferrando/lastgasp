@@ -210,6 +210,34 @@ class HTTPError extends Error {
   constructor(status, text) { super(text || "HTTP " + status); this.status = status; }
 }
 
+// copyText puts text on the clipboard. The Clipboard API only exists on HTTPS and localhost, so plain
+// HTTP uses a selected textarea, placed next to the button as a modal dialog makes the rest inert.
+async function copyText(text, button) {
+  if (window.isSecureContext && navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+  (button.parentElement || document.body).appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  button.focus();
+  return ok;
+}
+
+// copyButton copies text and says how it went on the button. When the browser refuses, a prompt
+// shows the text selected, ready for Ctrl+C.
+async function copyButton(button, text, label) {
+  const ok = await copyText(text, button);
+  if (!ok) window.prompt("Copy with Ctrl+C:", text);
+  button.textContent = ok ? "copied" : label;
+  setTimeout(() => { button.textContent = label; }, 1500);
+}
+
 // A 401 means the login ended, for example after -session-ttl, so the login page takes over.
 function toLogin() {
   location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
@@ -544,11 +572,7 @@ $("tok-add").onclick = async () => {
     b.disabled = false;
   }
 };
-$("tok-copy").onclick = async () => {
-  try { await navigator.clipboard.writeText($("tok-cmd").textContent); $("tok-copy").textContent = "copied"; }
-  catch { $("tok-copy").textContent = "copy failed"; }
-  setTimeout(() => { $("tok-copy").textContent = "copy"; }, 1500);
-};
+$("tok-copy").onclick = () => copyButton($("tok-copy"), $("tok-cmd").textContent, "copy");
 $("agents-section").onclick = async e => {
   const tb = e.target.closest("button[data-revoke-token]"), ab = e.target.closest("button[data-revoke-agent]");
   if (!tb && !ab) return;
@@ -702,16 +726,7 @@ $("inc-silence").onclick = async () => {
     incidentMsg("Not silenced: " + e.message);
   }
 };
-$("inc-copy").onclick = async () => {
-  const b = $("inc-copy");
-  try {
-    await navigator.clipboard.writeText(location.href);
-    b.textContent = "copied";
-  } catch {
-    b.textContent = "copy failed";
-  }
-  setTimeout(() => { b.textContent = "copy link"; }, 1500);
-};
+$("inc-copy").onclick = () => copyButton($("inc-copy"), location.href, "copy link");
 $("inc-logs").onclick = () => {
   if (!shown) return;
   const host = shown.host;

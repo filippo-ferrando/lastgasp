@@ -782,6 +782,10 @@ func TestUIHasControls(t *testing.T) {
 			t.Errorf("control %q missing", id)
 		}
 	}
+	// The Clipboard API is missing on plain HTTP, so copy buttons need the fallback.
+	if !strings.Contains(page, `execCommand("copy")`) || strings.Count(page, "navigator.clipboard") != 2 {
+		t.Error("copy buttons must go through copyText, which works without HTTPS")
+	}
 }
 
 // TestAgentRestartSendsStashedRecords runs an agent while no server answers, stops it, removes the

@@ -1,0 +1,45 @@
+# Alerts from lastgasp have the labels alertname (LastgaspCrash, LastgaspKernelError, ...), host, kind,
+# severity, rule and incident. Alerts from Prometheus about the server have alertname and severity.
+route:
+  receiver: ops
+  group_by: [alertname, host]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Crashes and other critical incidents go to the pager as well.
+    - matchers: ['severity="critical"']
+      receiver: pager
+      continue: true
+    # Reboots are info: shown in Alertmanager, not sent anywhere.
+    - matchers: ['alertname="LastgaspReboot"']
+      receiver: "null"
+
+# A crashed host is also silent for a while, the crash alert is enough.
+inhibit_rules:
+  - source_matchers: ['alertname="LastgaspCrash"']
+    target_matchers: ['alertname="LastgaspSilent"']
+    equal: [host]
+
+receivers:
+  - name: "null"
+  - name: ops
+    # Uncomment one, see https://prometheus.io/docs/alerting/latest/configuration/
+    # webhook_configs:
+    #   - url: https://hooks.example.net/alerts
+    # slack_configs:
+    #   - api_url: https://hooks.slack.com/services/T000/B000/XXXX
+    #     channel: "#ops"
+    #     title: '{{ .CommonAnnotations.summary }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }} {{ .Annotations.url }}{{ "\n" }}{{ end }}'
+    #     send_resolved: true
+    # telegram_configs:
+    #   - bot_token_file: /etc/alertmanager/telegram.token
+    #     chat_id: -1001234567890
+  - name: pager
+    # email_configs:
+    #   - to: oncall@example.net
+    #     from: alertmanager@example.net
+    #     smarthost: mail.example.net:587
+    #     auth_username: alertmanager
+    #     auth_password_file: /etc/alertmanager/smtp.pw

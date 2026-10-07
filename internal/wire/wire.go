@@ -20,7 +20,8 @@ import (
 const (
 	magic = "LGP1"
 	// Version 3 adds the oldest held seq to heartbeats and the receive state to acks.
-	version = 3
+	// Version 4 adds the agent version to heartbeats.
+	version = 4
 	// minVersion is the oldest version still accepted, so agents can be upgraded after the server.
 	minVersion = 2
 
@@ -39,6 +40,8 @@ const (
 
 	// MaxAckRanges bounds the missing ranges in one ack, so it always fits one packet.
 	MaxAckRanges = 32
+	// MaxAgentVersion bounds the agent version in a heartbeat.
+	MaxAgentVersion = 64
 )
 
 // Kind tells what a packet carries.
@@ -78,7 +81,7 @@ var (
 
 // Packet is one datagram. Seq starts at 1 and grows by one per packet sent by an agent instance.
 type Packet struct {
-	Version  uint8 // set by Decode and Seal; Encode writes version 2 only when asked
+	Version  uint8 // set by Decode and Seal; Seal writes an older version only when asked
 	Host     string
 	BootID   [16]byte
 	Instance uint64
@@ -90,6 +93,8 @@ type Packet struct {
 	// Oldest is the lowest seq the agent can still send again, for KindHeartbeat since version 3.
 	// Packets below it that never arrived are lost for good.
 	Oldest uint64
+	// AgentVersion is the build version of the agent, for KindHeartbeat since version 4.
+	AgentVersion string
 }
 
 // Range is an inclusive range of packet sequence numbers.
@@ -202,7 +207,7 @@ func NewSealer(key []byte, host string, bootID [16]byte, instance uint64) (*Seal
 // Seal encodes and encrypts p. Host, BootID and Instance are taken from the sealer.
 func (s *Sealer) Seal(p *Packet) ([]byte, error) {
 	p.Host, p.BootID, p.Instance = s.host, s.bootID, s.instance
-	if p.Version != minVersion {
+	if p.Version < minVersion || p.Version > version {
 		p.Version = version
 	}
 	inner, err := encodeInner(p, p.Version)
@@ -241,10 +246,8 @@ func EncodeAck(p *Packet, upto uint64, missing []Range, key []byte) ([]byte, err
 	var r [8]byte
 	rand.Read(r[:])
 	ctr := binary.BigEndian.Uint64(r[:])
-	ver := uint8(version)
-	if p.Version == minVersion {
-		ver = minVersion
-	}
+	// The ack has the version of the heartbeat, so an older agent can read it.
+	ver := min(max(p.Version, minVersion), version)
 	b := make([]byte, 0, MaxPacket)
 	b = append(b, byte(KindAck))
 	b = binary.BigEndian.AppendUint64(b, p.Seq)
@@ -343,6 +346,14 @@ func encodeInner(p *Packet, ver uint8) ([]byte, error) {
 		if ver >= 3 {
 			b = binary.BigEndian.AppendUint64(b, p.Oldest)
 		}
+		if ver >= 4 {
+			v := p.AgentVersion
+			if len(v) > MaxAgentVersion {
+				v = v[:MaxAgentVersion]
+			}
+			b = append(b, byte(len(v)))
+			b = append(b, v...)
+		}
 	default:
 		return nil, ErrKind
 	}
@@ -425,6 +436,13 @@ func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
 		s.Buffered = r.u32()
 		if p.Version >= 3 {
 			p.Oldest = r.u64()
+		}
+		if p.Version >= 4 {
+			n := int(r.u8())
+			if n > MaxAgentVersion {
+				return nil, ErrMalformed
+			}
+			p.AgentVersion = strings.ToValidUTF8(string(r.take(n)), "?")
 		}
 	default:
 		return nil, ErrKind

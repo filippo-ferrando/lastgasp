@@ -445,7 +445,7 @@ func TestSenderSendsPstoreFirst(t *testing.T) {
 	for _, m := range []string{"k1", "k2", "k3"} {
 		q.Push(Item{Kind: wire.KindKmsg, Rec: wire.Record{Msg: m}})
 	}
-	s := &Sender{Host: "h", Key: testKey, Queue: q, Pstore: ps, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+	s := &Sender{Host: "h", Key: testKey, Queue: q, First: ps, Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
 		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}}
 	s.newConn = func() (packetConn, error) { return conn, nil }
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

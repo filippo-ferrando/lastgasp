@@ -1,0 +1,57 @@
+# lastgasp-server sends incidents to Alertmanager, which groups and routes them.
+# Prometheus scrapes the server and alerts when the server itself is down or unhealthy.
+#
+#   openssl rand -hex 32 > agent.key
+#   echo "*  $(cat agent.key)" > keys
+#   sudo chown 65532:65532 keys && chmod 600 keys
+#   edit alertmanager.yml: add a receiver (webhook, email, Slack, Telegram...)
+#   docker compose up -d
+#
+# lastgasp UI: http://127.0.0.1:8080, Alertmanager: http://127.0.0.1:9093, Prometheus: http://127.0.0.1:9090
+# Pin the Prometheus and Alertmanager versions in production.
+
+services:
+  server:
+    build: ../..
+    image: lastgasp-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=/var/lib/lastgasp/lastgasp.db
+      - -key-file=/etc/lastgasp/keys
+      - -retain=720h
+      # Alertmanager does the grouping and repeating, so lastgasp sends everything and does not rate limit.
+      - -alert-webhook=name=alertmanager,format=alertmanager,min=info,rate=0s,url=http://alertmanager:9093/api/v2/alerts
+      - -public-url=${LASTGASP_PUBLIC_URL:-http://127.0.0.1:8080}
+    volumes:
+      - data:/var/lib/lastgasp
+      - ./keys:/etc/lastgasp/keys:ro
+    ports:
+      - "5140:5140/udp"
+      - "127.0.0.1:8080:8080"
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - amdata:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules.yml:/etc/prometheus/rules.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+volumes:
+  data:
+  amdata:
+  promdata:

@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +54,7 @@ const (
 	AlertResolved   = "resolved" // a second alert said the problem is over
 	AlertSkipped    = "skipped"  // the problem was over before the alert went out, so nothing was sent
 	AlertFailed     = "failed"   // the target refused the alert for good, or kept failing, so it was given up
+	AlertSilenced   = "silenced" // a silence matched the incident, so nothing was sent
 )
 
 // AlertState is the alert state of an incident for one target.
@@ -77,6 +80,9 @@ type Incident struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 	ClosedAt      time.Time `json:"closed_at,omitzero"`
 	AckedAt       time.Time `json:"acked_at,omitzero"`
+	AckedBy       string    `json:"acked_by,omitempty"`
+	// Note is free text set by a user when acknowledging or resolving.
+	Note string `json:"note,omitempty"`
 	// Resolved means the problem is over, so targets that got an alert get a second one.
 	Resolved bool         `json:"resolved"`
 	Alerts   []AlertState `json:"alerts"`
@@ -115,14 +121,14 @@ func b2i(b bool) int {
 }
 
 const incidentCols = `i.id, i.host, i.boot_id, i.kind, i.severity, i.rule, i.opened_at, i.updated_at, i.closed_at,
-	i.first_record_id, i.last_record_id, i.count, i.summary, i.resolved, i.acked_at`
+	i.first_record_id, i.last_record_id, i.count, i.summary, i.resolved, i.acked_at, i.acked_by, i.note`
 
 func scanIncident(sc interface{ Scan(...any) error }) (Incident, error) {
 	var i Incident
 	var opened, updated, closed, acked int64
 	var resolved int
 	err := sc.Scan(&i.ID, &i.Host, &i.BootID, &i.Kind, &i.Severity, &i.Rule, &opened, &updated, &closed,
-		&i.FirstRecordID, &i.LastRecordID, &i.Count, &i.Summary, &resolved, &acked)
+		&i.FirstRecordID, &i.LastRecordID, &i.Count, &i.Summary, &resolved, &acked, &i.AckedBy, &i.Note)
 	i.OpenedAt, i.UpdatedAt, i.ClosedAt, i.AckedAt = fromMs(opened), fromMs(updated), fromMs(closed), fromMs(acked)
 	i.Resolved = resolved == 1
 	i.Alerts = []AlertState{}
@@ -232,6 +238,12 @@ func (s *Store) PendingAlerts(ctx context.Context, target string, min Severity, 
 	return out, nil
 }
 
+// SentOpenIncidents returns the open incidents a target sent an alert for, oldest first.
+func (s *Store) SentOpenIncidents(ctx context.Context, target string) ([]Incident, error) {
+	return s.queryIncidents(ctx, `SELECT `+incidentCols+` FROM incidents i JOIN alerts a ON a.incident_id = i.id
+		WHERE a.target = ? AND a.state = 'sent' AND i.closed_at = 0 ORDER BY i.id LIMIT 1000`, target)
+}
+
 func (s *Store) queryIncidents(ctx context.Context, query string, args ...any) ([]Incident, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
@@ -289,9 +301,26 @@ func (s *Store) ResetAlerts(ctx context.Context, id int64) error {
 	return err
 }
 
-// AckIncident marks an incident as seen. It returns ErrNotFound for an unknown ID.
-func (s *Store) AckIncident(ctx context.Context, id int64, t time.Time) error {
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE incidents SET acked_at = ? WHERE id = ?`), ms(t), id)
+// AckIncident marks an incident as seen by user, with an optional note. It returns ErrNotFound for an unknown ID.
+func (s *Store) AckIncident(ctx context.Context, id int64, user, note string, t time.Time) error {
+	if note == "" {
+		return s.updateOne(ctx, `UPDATE incidents SET acked_at = ?, acked_by = ? WHERE id = ?`, ms(t), user, id)
+	}
+	return s.updateOne(ctx, `UPDATE incidents SET acked_at = ?, acked_by = ?, note = ? WHERE id = ?`, ms(t), user, note, id)
+}
+
+// ResolveIncident marks a closed incident as resolved by a user, so targets that got an alert get a second one.
+func (s *Store) ResolveIncident(ctx context.Context, id int64, user, note string, t time.Time) error {
+	if note == "" {
+		note = "resolved by " + user
+	}
+	return s.updateOne(ctx, `UPDATE incidents SET resolved = 1, updated_at = ?, note = ? WHERE id = ? AND closed_at <> 0`,
+		ms(t), note, id)
+}
+
+// updateOne runs an update of one incident and returns ErrNotFound when no row matched.
+func (s *Store) updateOne(ctx context.Context, query string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, s.q(query), args...)
 	if err != nil {
 		return err
 	}
@@ -313,4 +342,99 @@ func (s *Store) DeleteIncidentsBefore(ctx context.Context, t time.Time) (int64, 
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM alerts WHERE incident_id NOT IN (SELECT id FROM incidents)`)
 	return n, err
+}
+
+// Silence holds back alerts of matching incidents opened between StartsAt and EndsAt, like during maintenance.
+type Silence struct {
+	ID        int64     `json:"id"`
+	Host      string    `json:"host"` // a host name or a pattern like "db-*", "*" for every host
+	Kind      string    `json:"kind"` // an incident kind, "" for every kind
+	StartsAt  time.Time `json:"starts_at"`
+	EndsAt    time.Time `json:"ends_at"`
+	Comment   string    `json:"comment"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Active reports whether the silence holds back alerts at t.
+func (s *Silence) Active(t time.Time) bool { return !t.Before(s.StartsAt) && t.Before(s.EndsAt) }
+
+// Matches reports whether the silence covers inc, opened while it was active or alerted while it is active at now.
+func (s *Silence) Matches(inc *Incident, now time.Time) bool {
+	if s.Kind != "" && s.Kind != inc.Kind {
+		return false
+	}
+	if ok, err := path.Match(s.Host, inc.Host); err != nil || !ok {
+		return false
+	}
+	return s.Active(inc.OpenedAt) || s.Active(now)
+}
+
+// ValidSilence checks a silence before it is saved.
+func ValidSilence(s *Silence) error {
+	if s.Host == "" {
+		return errors.New("host is required, \"*\" for every host")
+	}
+	if _, err := path.Match(s.Host, ""); err != nil {
+		return fmt.Errorf("host pattern %q: %w", s.Host, err)
+	}
+	if !s.EndsAt.After(s.StartsAt) {
+		return errors.New("a silence must end after it starts")
+	}
+	return nil
+}
+
+// CreateSilence saves a silence and sets its ID.
+func (s *Store) CreateSilence(ctx context.Context, sl *Silence) error {
+	if err := ValidSilence(sl); err != nil {
+		return err
+	}
+	return s.db.QueryRowContext(ctx, s.q(`INSERT INTO silences (host, kind, starts_at, ends_at, comment, created_by, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`),
+		sl.Host, sl.Kind, ms(sl.StartsAt), ms(sl.EndsAt), sl.Comment, sl.CreatedBy, ms(sl.CreatedAt)).Scan(&sl.ID)
+}
+
+// Silences returns silences that end after since, newest first.
+func (s *Store) Silences(ctx context.Context, since time.Time) ([]Silence, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, host, kind, starts_at, ends_at, comment, created_by, created_at
+		FROM silences WHERE ends_at > ? ORDER BY id DESC LIMIT 1000`), ms(since))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Silence{}
+	for rows.Next() {
+		var sl Silence
+		var starts, ends, created int64
+		if err := rows.Scan(&sl.ID, &sl.Host, &sl.Kind, &starts, &ends, &sl.Comment, &sl.CreatedBy, &created); err != nil {
+			return nil, err
+		}
+		sl.StartsAt, sl.EndsAt, sl.CreatedAt = fromMs(starts), fromMs(ends), fromMs(created)
+		out = append(out, sl)
+	}
+	return out, rows.Err()
+}
+
+// EndSilence ends a silence at t, if it would end later. It returns ErrNotFound for an unknown ID.
+func (s *Store) EndSilence(ctx context.Context, id int64, t time.Time) error {
+	var ends int64
+	if err := s.db.QueryRowContext(ctx, s.q(`SELECT ends_at FROM silences WHERE id = ?`), id).Scan(&ends); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return err
+	}
+	// A silence that has not started yet ends where it starts, so it never holds anything back.
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE silences SET ends_at = CASE WHEN starts_at > ? THEN starts_at ELSE ? END
+		WHERE id = ? AND ends_at > ?`), ms(t), ms(t), id, ms(t))
+	return err
+}
+
+// DeleteSilencesBefore removes silences that ended before t.
+func (s *Store) DeleteSilencesBefore(ctx context.Context, t time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM silences WHERE ends_at < ?`), ms(t))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

@@ -1,0 +1,44 @@
+# lastgasp-server with SQLite that sends alerts to a Telegram group or channel.
+#
+#   openssl rand -hex 32 > agent.key
+#   echo "*  $(cat agent.key)" > keys
+#   echo "123456:ABC-your-bot-token" > telegram.token    # from @BotFather
+#   sudo chown 65532:65532 keys telegram.token && chmod 600 keys telegram.token
+#   echo "TELEGRAM_CHAT=-1001234567890" > .env           # chat ID, or @channelname
+#   docker compose up -d
+#
+# Add the bot to the group first. A test alert: echo "<3>BUG: lastgasp test" > /dev/kmsg on an agent host.
+
+services:
+  server:
+    build: ../..
+    image: lastgasp-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=/var/lib/lastgasp/lastgasp.db
+      - -key-file=/etc/lastgasp/keys
+      - -retain=720h
+      # Every warning and critical incident, at most one per host, kind and rule every 10 minutes.
+      - -alert-telegram=chat=${TELEGRAM_CHAT:?set TELEGRAM_CHAT in .env},token-file=/run/secrets/telegram_token
+      # A second chat for critical incidents only, like crashes:
+      # - -alert-telegram=name=oncall,min=critical,rate=0s,chat=-1009876543210,token-file=/run/secrets/telegram_token
+      # Links in the messages point here.
+      - -public-url=${LASTGASP_PUBLIC_URL:-http://127.0.0.1:8080}
+    secrets:
+      - telegram_token
+    volumes:
+      - data:/var/lib/lastgasp
+      - ./keys:/etc/lastgasp/keys:ro
+    ports:
+      - "5140:5140/udp"
+      - "127.0.0.1:8080:8080"
+
+secrets:
+  telegram_token:
+    file: ./telegram.token
+
+volumes:
+  data:

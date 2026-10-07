@@ -1,0 +1,5 @@
+{$LASTGASP_DOMAIN} {
+	encode gzip
+	# Caddy sets X-Forwarded-For and streams responses, so long downloads work.
+	reverse_proxy server:8080
+}

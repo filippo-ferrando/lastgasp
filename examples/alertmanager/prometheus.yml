@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [alertmanager:9093]
+
+scrape_configs:
+  - job_name: lastgasp
+    static_configs:
+      - targets: [server:8080]
+    # With -auth-metrics on the server, add a viewer token:
+    # authorization:
+    #   credentials_file: /etc/prometheus/lastgasp.token

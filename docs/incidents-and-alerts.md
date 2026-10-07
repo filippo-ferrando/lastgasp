@@ -10,8 +10,25 @@ The server turns the moments that matter into incidents, one per host, boot, kin
 | `silent` | no packet for `-silent-after` | the host sends again (resolved), or a clean reboot | warning |
 | `reboot` | a new boot ID shows up. Open incidents of the old boot are closed | after `-crash-wait`, when the crash check finds nothing | info |
 | `crash` | a reboot where the old boot left pstore lines, or its last kernel lines match a critical rule | never resolved | critical |
+| `server` | a problem of the lastgasp server itself, see [Server incidents](#server-incidents) | 5 minutes without a new problem (resolved) | from the check |
 
 A clean reboot is a reboot that did not turn into a crash. A crash does not resolve the errors that led to it.
+
+Any incident except an open `reboot` or `silent` one can also be resolved by hand, see [Working with incidents](#working-with-incidents).
+
+### Server incidents
+
+The server checks its own counters every 10 seconds. When one grows, it opens a `server` incident with host `@server`, or adds to the open one. It goes through the alert targets like any other incident, so problems of the server reach someone even without Prometheus.
+
+| Rule | Severity | Counter |
+| --- | --- | --- |
+| `records_lost` | critical | records lost because the database kept failing after retries |
+| `database` | warning | database errors, retried ones included |
+| `queue` | warning | packets dropped because the server queue was full |
+| `alerts` | warning | alert sends that failed |
+| `keys` | warning | packets with an unknown host or a wrong key |
+
+Agent hosts should not be named `@server`. The Prometheus rules in [operations.md](operations.md#monitoring) cover the same problems and also notice a server that is down, which a server cannot report about itself.
 
 ### How a crash is found
 
@@ -73,9 +90,34 @@ oom         off
 
 The file is checked at start and on `SIGHUP`. A broken file keeps the old rules.
 
+## Working with incidents
+
+Admins can act on an incident from its page in the UI, or through the [API](web-ui-and-api.md#api):
+
+| Action | Effect |
+| --- | --- |
+| acknowledge | marks the incident as seen, with the user name and an optional note. Alerts are not changed |
+| resolve | closes the incident as resolved, with an optional note. Targets that got its alert get a resolve alert. A new matching line opens a new incident. Not possible for an open `reboot` (the crash check decides) or an open `silent` incident (it closes when the host sends again) |
+| silence host | adds a silence for the host of the incident, see below |
+
+### Silences
+
+A silence holds back alerts of matching incidents, for example during maintenance. Incidents are still opened and shown, but their alert state becomes `silenced` and nothing is sent. Resolve alerts are not sent either, as no alert went out.
+
+| Field | Meaning |
+| --- | --- |
+| host | a host name or a pattern: `db-01`, `db-*`, `web-[12]`, or `*` for every host |
+| kind | an incident kind, or empty for every kind |
+| start, end | the window. It starts now by default, and can start later |
+| comment | why, shown in the UI |
+
+An incident is silenced when it was opened during the window, or when its alert would be sent during the window. So a reboot at the end of a maintenance window stays quiet, even though its alert waits for the crash check. Ending a silence early stops it for new incidents.
+
+Silences are created and ended in the UI (the Silences section, or "silence host" on an incident) or through the API. Silences that ended more than `-retain` ago are deleted.
+
 ## Alerts
 
-Each `-alert-webhook` or `-alert-email` is one target. Each target has its own alert state, retries and rate limit, so one target that is down does not hold back the others.
+Each `-alert-webhook`, `-alert-telegram` or `-alert-email` is one target. Each target has its own alert state, retries and rate limit, so one target that is down does not hold back the others.
 
 | Rule | Detail |
 | --- | --- |
@@ -88,6 +130,7 @@ Each `-alert-webhook` or `-alert-email` is one target. Each target has its own a
 | resolved | when an incident is resolved, every target that sent its alert gets a second one with `"resolved": true` |
 | skipped | a host that goes silent and comes back before a target sent the alert is a short blip: that target sends nothing and marks it `skipped` |
 | crash after reboot | a reboot that turns into a crash is alerted again to every target |
+| silenced | an incident matching an active silence is marked `silenced` and not sent |
 
 The alert state per target shows in the UI next to each incident, for example `chat sent, pager suppressed`.
 
@@ -104,7 +147,7 @@ The value is a URL, or options followed by `url=` (last, so the URL may hold com
 | Option | Meaning |
 | --- | --- |
 | `name` | target name, shown in the UI and metrics. Default: the URL host, so secrets in the URL stay hidden. Two targets need different names |
-| `format` | `json` or `slack` (default `-alert-format`) |
+| `format` | `json`, `slack` or `alertmanager` (default `-alert-format`) |
 | `min` | lowest severity sent (default `-alert-min-severity`) |
 | `key-file` | key that signs the body (default `-alert-key-file`) |
 | `rate` | rate limit (default `-alert-rate-limit`) |
@@ -131,6 +174,35 @@ The request is a `POST` with `Content-Type: application/json` and a 10 second ti
 ```json
 {"text": "[critical] db-01 crashed: Kernel panic - not syncing: Fatal exception https://lastgasp.example.net/#incident=42"}
 ```
+
+### Alertmanager
+
+With `format=alertmanager` the target is the Alertmanager v2 API, and Alertmanager does the routing, grouping and silencing:
+
+```sh
+-alert-webhook 'name=am,format=alertmanager,url=http://alertmanager:9093/api/v2/alerts'
+```
+
+Each incident is one alert:
+
+```json
+[{
+  "labels": {"alertname": "LastgaspCrash", "host": "db-01", "kind": "crash", "severity": "critical", "rule": "panic", "incident": "42"},
+  "annotations": {"summary": "[critical] db-01 crashed", "description": "Kernel panic - not syncing: Fatal exception",
+    "url": "https://lastgasp.example.net/#incident=42"},
+  "startsAt": "2026-10-06T08:12:03Z",
+  "endsAt": "2026-10-06T09:14:03Z",
+  "generatorURL": "https://lastgasp.example.net/#incident=42"
+}]
+```
+
+| Incident | `endsAt` |
+| --- | --- |
+| open (`silent`, `kernel_error`, `server`) | 5 minutes ahead. The server sends every open incident again each minute, so it keeps firing until it is resolved, and stops firing within 5 minutes if the lastgasp server dies |
+| closed but not resolved (`crash`, `reboot`) | one hour after it was sent. These are events, they fire once and then end |
+| resolved | the time it closed |
+
+The alert name is `Lastgasp` plus the kind: `LastgaspCrash`, `LastgaspReboot`, `LastgaspSilent`, `LastgaspKernelError`, `LastgaspServer`. With a `key-file`, the body is signed like any webhook, but Alertmanager does not check it. Route on the `severity` and `host` labels in the Alertmanager configuration.
 
 ### Signed webhooks
 
@@ -178,6 +250,26 @@ The value is a list of options. `to` and `smtp` are required, more recipients fo
 | `name`, `min`, `rate` | as for webhooks. The default name is `email` |
 
 The subject is the short form, like `[critical] db-01 crashed`. The body has the summary, the incident details and link, the last 40 pstore lines for crashes, and the last 40 kernel lines. Host names and log lines cannot add headers or end the message early.
+
+### Telegram
+
+The value is a list of options. `chat` and `token-file` are required:
+
+```sh
+-alert-telegram 'chat=-1001234567890,token-file=/etc/lastgasp/telegram.token'
+-alert-telegram 'name=oncall,min=critical,chat=@lastgasp_alerts,token-file=/etc/lastgasp/telegram.token'
+```
+
+| Option | Meaning |
+| --- | --- |
+| `chat` | chat ID (a group or channel ID like `-1001234567890`, or a user ID) or `@channelname` |
+| `token-file` | file with the bot token from BotFather, like `123456:ABC-DEF...`. Readable only by the server |
+| `api` | another Bot API server, default `https://api.telegram.org` |
+| `name`, `min`, `rate` | as for webhooks. The default name is `telegram` |
+
+Setup: create a bot with [@BotFather](https://t.me/BotFather), add it to the group or channel, then find the chat ID, for example by sending a message to the group and opening `https://api.telegram.org/bot<token>/getUpdates`.
+
+The message is plain text: the short form, the summary and the link. The token never shows in logs, metrics or the UI.
 
 ## Testing incidents
 

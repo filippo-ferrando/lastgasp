@@ -67,6 +67,12 @@ func (k *Keyring) Lookup(host string) []byte {
 	return k.def
 }
 
+// Exact returns the key of a host line, without the "*" entry.
+func (k *Keyring) Exact(host string) []byte { return k.hosts[host] }
+
+// Default returns the "*" key, or nil.
+func (k *Keyring) Default() []byte { return k.def }
+
 // KeyFile is a keyring loaded from a file that can be reloaded while the server runs.
 type KeyFile struct {
 	path string
@@ -94,6 +100,9 @@ func (k *KeyFile) Reload() error {
 
 // Lookup returns the key for host from the newest loaded keyring.
 func (k *KeyFile) Lookup(host string) []byte { return k.cur.Load().Lookup(host) }
+
+// Current returns the newest loaded keyring.
+func (k *KeyFile) Current() *Keyring { return k.cur.Load() }
 
 // Hosts returns the number of host entries, counting "*" as one.
 func (k *KeyFile) Hosts() int {

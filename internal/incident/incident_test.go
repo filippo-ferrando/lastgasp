@@ -609,3 +609,105 @@ func TestTickQueriesRunWithoutLock(t *testing.T) {
 		t.Fatal("crash not found")
 	}
 }
+
+func TestServerProblemOpensAndResolves(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.d.ServerProblem(ctx, "database", store.SeverityWarning, 2, "Database errors.", e.t0)
+	e.d.ServerProblem(ctx, "database", store.SeverityWarning, 3, "Database errors.", e.t0.Add(4*time.Minute))
+	l := e.incidents(t)
+	if len(l) != 1 || l[0].Kind != KindServer || l[0].Host != ServerHost || l[0].Rule != "database" || l[0].Count != 5 || !l[0].Open() {
+		t.Fatalf("got %+v", l)
+	}
+	if h := Headline(&l[0], false); h != "[warning] lastgasp server: database problem" {
+		t.Fatalf("headline %q", h)
+	}
+	// Five quiet minutes count from the last problem, not the first.
+	e.d.Tick(ctx, e.t0.Add(8*time.Minute))
+	if l := e.incidents(t); !l[0].Open() {
+		t.Fatal("resolved too early")
+	}
+	e.d.Tick(ctx, e.t0.Add(9*time.Minute))
+	l = e.incidents(t)
+	if l[0].Open() || !l[0].Resolved || !strings.Contains(l[0].Summary, "(no new problem for 5m0s)") {
+		t.Fatalf("got %+v", l[0])
+	}
+	if h := Headline(&l[0], true); h != "[resolved] lastgasp server: database is fine again" {
+		t.Fatalf("headline %q", h)
+	}
+	// A new problem after that opens a new incident.
+	e.d.ServerProblem(ctx, "database", store.SeverityWarning, 1, "Database errors.", e.t0.Add(10*time.Minute))
+	if l := e.incidents(t); len(l) != 2 || !l[0].Open() {
+		t.Fatalf("got %+v", l)
+	}
+}
+
+func TestNotifierHonorsSilences(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	h := &hook{}
+	n := &Notifier{Store: e.st, Name: "hook", URL: newHook(t, h), MinSeverity: store.SeverityWarning, Metrics: e.d.Metrics, Log: e.d.Log}
+	n.init()
+	n.now = func() time.Time { return e.t0.Add(time.Minute) }
+	if err := e.st.CreateSilence(ctx, &store.Silence{Host: "db-*", StartsAt: e.t0.Add(-time.Hour), EndsAt: e.t0.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	e.add(t, "db-01", "b1", "kmsg", e.t0, "Kernel panic - not syncing: planned test")
+	e.add(t, "web-01", "b1", "kmsg", e.t0, "Kernel panic - not syncing: real")
+	if err := n.flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.bodies) != 1 || !strings.Contains(h.bodies[0], "web-01") {
+		t.Fatalf("sent %v", h.bodies)
+	}
+	states := map[string]string{}
+	for _, i := range e.incidents(t) {
+		states[i.Host] = alertOf(i, "hook")
+	}
+	if states["db-01"] != store.AlertSilenced || states["web-01"] != store.AlertSent {
+		t.Fatalf("alert states %v", states)
+	}
+}
+
+func TestResolveByHand(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.add(t, "h", "b1", "kmsg", e.t0, "Out of memory: Killed process 1")
+	e.d.Tick(ctx, e.t0.Add(3*time.Minute))                      // h is silent now
+	e.d.NewBoot(ctx, "h2", "b2", "b1", e.t0.Add(3*time.Minute)) // a reboot still waiting for the crash check
+	var oom, reboot, silent store.Incident
+	for _, i := range e.incidents(t) {
+		switch i.Kind {
+		case KindKernelError:
+			oom = i
+		case KindReboot:
+			reboot = i
+		case KindSilent:
+			silent = i
+		}
+	}
+	if err := e.d.Resolve(ctx, silent.ID, "alice", "", e.t0); err != ErrSilentOpen {
+		t.Fatalf("silent: %v", err)
+	}
+	if err := e.d.Resolve(ctx, reboot.ID, "alice", "", e.t0); err != ErrRebootPending {
+		t.Fatalf("reboot: %v", err)
+	}
+	if err := e.d.Resolve(ctx, oom.ID, "alice", "fixed the leak", e.t0.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.st.GetIncident(ctx, oom.ID)
+	if got.Open() || !got.Resolved || got.Note != "fixed the leak" {
+		t.Fatalf("got %+v", got)
+	}
+	// The next matching line opens a new incident.
+	e.add(t, "h", "b1", "kmsg", e.t0.Add(5*time.Minute), "Out of memory: Killed process 2")
+	n := 0
+	for _, i := range e.incidents(t) {
+		if i.Kind == KindKernelError && i.Open() {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d open kernel error incidents", n)
+	}
+}

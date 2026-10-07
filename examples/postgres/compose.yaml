@@ -1,0 +1,53 @@
+# lastgasp-server with PostgreSQL, for many hosts or an existing database setup.
+#
+#   openssl rand -hex 32 > agent.key
+#   echo "*  $(cat agent.key)" > keys
+#   sudo chown 65532:65532 keys && chmod 600 keys
+#   echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" > .env
+#   docker compose up -d
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lastgasp
+      POSTGRES_DB: lastgasp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lastgasp -d lastgasp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build: ../..
+    image: lastgasp-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+    # pgx reads PGPASSWORD, so the password stays out of the command line and the logs.
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=postgres://lastgasp@db:5432/lastgasp?sslmode=disable
+      - -key-file=/etc/lastgasp/keys
+      # Errors and warnings for 90 days, info and debug lines for 7.
+      - -retain=2160h
+      - -retain-info=168h
+      # One noisy host cannot push out the logs of the others.
+      - -retain-host-records=2000000
+    volumes:
+      - ./keys:/etc/lastgasp/keys:ro
+    ports:
+      - "5140:5140/udp"
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  pgdata:

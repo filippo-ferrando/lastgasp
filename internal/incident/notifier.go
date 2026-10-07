@@ -13,7 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/textproto"
-	"net/url"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -43,10 +43,11 @@ func permanent(err error) bool {
 // the target took it, so alerts not sent before a restart are sent after it.
 type Notifier struct {
 	Store       *store.Store
-	Name        string // target name, the key of its alert state
-	Email       *Email // set for an email target, URL is used otherwise
+	Name        string    // target name, the key of its alert state
+	Email       *Email    // set for an email target
+	Telegram    *Telegram // set for a Telegram target, URL is used when neither is set
 	URL         string
-	Format      string // "json" or "slack"
+	Format      string // "json", "slack" or "alertmanager"
 	Key         []byte // signs the body when set
 	PublicURL   string // base URL of the web UI, for links
 	MinSeverity store.Severity
@@ -55,11 +56,12 @@ type Notifier struct {
 	Metrics     *Metrics
 	Log         *slog.Logger
 
-	once  sync.Once
-	wake  chan struct{}
-	last  map[string]time.Time
-	tries map[string]int
-	now   func() time.Time
+	once      sync.Once
+	wake      chan struct{}
+	last      map[string]time.Time
+	tries     map[string]int
+	now       func() time.Time
+	refreshed time.Time // last time open incidents were sent again to Alertmanager
 }
 
 // Payload is the JSON body sent with the "json" format.
@@ -108,6 +110,12 @@ func (n *Notifier) Run(ctx context.Context) {
 			retry = min(retry*2, 5*time.Minute)
 		} else {
 			retry, wait = time.Second, 0
+			if n.Format == "alertmanager" && n.now().Sub(n.refreshed) >= amRefresh {
+				if err := n.refresh(ctx); err != nil {
+					n.Log.Warn("alert refresh", "target", n.Name, "err", err)
+				}
+				n.refreshed = n.now()
+			}
 		}
 		if wait > 0 {
 			select {
@@ -133,6 +141,10 @@ func (n *Notifier) flush(ctx context.Context) error {
 		if err != nil || len(pending) == 0 {
 			return err
 		}
+		silences, err := n.Store.Silences(ctx, n.now().Add(-MaxAlertAge))
+		if err != nil {
+			return err
+		}
 		for i := range pending {
 			p := &pending[i]
 			// Rules have their own limit, so a warning never holds back a critical line of another rule.
@@ -145,6 +157,8 @@ func (n *Notifier) flush(ctx context.Context) error {
 			case p.Kind == KindSilent && p.Resolved:
 				// A short blip: the host came back before this target heard about it.
 				state = store.AlertSkipped
+			case silenced(silences, &p.Incident, n.now()):
+				state = store.AlertSilenced
 			case n.RateLimit > 0 && n.now().Sub(n.last[key]) < n.RateLimit:
 				state = store.AlertSuppressed
 			}
@@ -172,6 +186,15 @@ func (n *Notifier) flush(ctx context.Context) error {
 	}
 }
 
+func silenced(l []store.Silence, inc *store.Incident, now time.Time) bool {
+	for i := range l {
+		if l[i].Matches(inc, now) {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *Notifier) link(id int64) string {
 	if n.PublicURL == "" {
 		return ""
@@ -180,19 +203,30 @@ func (n *Notifier) link(id int64) string {
 }
 
 func (n *Notifier) send(ctx context.Context, p *store.PendingAlert) error {
-	if n.Email != nil {
+	switch {
+	case n.Email != nil:
 		return n.sendEmail(ctx, p)
+	case n.Telegram != nil:
+		return n.sendTelegram(ctx, p)
 	}
 	inc := &p.Incident
 	link := n.link(inc.ID)
 	text := Text(inc, p.Resolve, link)
 	var body []byte
-	if n.Format == "slack" {
+	switch n.Format {
+	case "slack":
 		body, _ = json.Marshal(map[string]string{"text": text})
-	} else {
+	case "alertmanager":
+		body, _ = json.Marshal([]amAlert{n.amAlert(inc, p.Resolve)})
+	default:
 		body, _ = json.Marshal(Payload{Text: text, URL: link, Resolved: p.Resolve, Target: n.Name, Incident: *inc})
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
+	return n.post(ctx, n.URL, body)
+}
+
+// post sends a JSON body and sorts the answer into success, failures worth a retry and permanent ones.
+func (n *Notifier) post(ctx context.Context, url string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -203,12 +237,17 @@ func (n *Notifier) send(ctx context.Context, p *store.PendingAlert) error {
 	}
 	resp, err := n.Client.Do(req)
 	if err != nil {
+		// The URL can hold a secret, like a Telegram bot token, so errors only name the target.
+		var ue *neturl.Error
+		if errors.As(err, &ue) {
+			ue.URL = n.Name
+		}
 		return err
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode/100 != 2 {
-		err := fmt.Errorf("webhook %s answered %s", n.Name, resp.Status)
+		err := fmt.Errorf("target %s answered %s", n.Name, resp.Status)
 		if resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
 			return permanentError{err}
 		}
@@ -226,6 +265,12 @@ func Sign(key, body []byte) string {
 
 // Headline is a short description of an incident, like "[critical] db-01 crashed".
 func Headline(inc *store.Incident, resolved bool) string {
+	if inc.Kind == KindServer {
+		if resolved {
+			return fmt.Sprintf("[resolved] lastgasp server: %s is fine again", inc.Rule)
+		}
+		return fmt.Sprintf("[%s] lastgasp server: %s problem", inc.Severity, inc.Rule)
+	}
 	what := map[string]string{KindCrash: "crashed", KindReboot: "rebooted", KindSilent: "went silent",
 		KindKernelError: "kernel error (" + inc.Rule + ")"}[inc.Kind]
 	if what == "" {
@@ -302,7 +347,7 @@ func ParseTarget(spec string, def *Notifier) (*Notifier, error) {
 			}
 		}
 	}
-	u, err := url.Parse(rest)
+	u, err := neturl.Parse(rest)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("webhook %q: want an http or https URL, given last as url=...", spec)
 	}
@@ -310,8 +355,8 @@ func ParseTarget(spec string, def *Notifier) (*Notifier, error) {
 	if n.Name == "" {
 		n.Name = u.Hostname()
 	}
-	if n.Format != "json" && n.Format != "slack" {
-		return nil, fmt.Errorf("webhook %s: format must be json or slack", n.Name)
+	if n.Format != "json" && n.Format != "slack" && n.Format != "alertmanager" {
+		return nil, fmt.Errorf("webhook %s: format must be json, slack or alertmanager", n.Name)
 	}
 	return n, nil
 }

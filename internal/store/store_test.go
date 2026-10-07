@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,7 +25,7 @@ func openStores(t *testing.T) map[string]*Store {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, tbl := range []string{"records", "boots", "pstore_files", "streams", "incidents", "alerts", "retired_boots"} {
+		for _, tbl := range []string{"records", "boots", "pstore_files", "streams", "incidents", "alerts", "retired_boots", "silences", "sessions", "enroll_tokens", "agent_keys"} {
 			pg.db.Exec("DELETE FROM " + tbl)
 		}
 		t.Cleanup(func() { pg.Close() })
@@ -236,14 +237,19 @@ func TestIncidents(t *testing.T) {
 			if got, _ := s.PendingAlerts(ctx, "slack", SeverityWarning, since, 10); len(got) != 1 {
 				t.Fatalf("after resolve %+v", got)
 			}
-			if err := s.AckIncident(ctx, crit.ID, now); err != nil {
+			if err := s.AckIncident(ctx, crit.ID, "alice", "disk replaced", now); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.AckIncident(ctx, 9999, now); err != ErrNotFound {
+			// A second ack without a note keeps the first note.
+			if err := s.AckIncident(ctx, crit.ID, "bob", "", now); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.AckIncident(ctx, 9999, "alice", "", now); err != ErrNotFound {
 				t.Fatalf("ack unknown: %v", err)
 			}
 			one, _ := s.GetIncident(ctx, crit.ID)
-			if one.AckedAt.IsZero() || !one.Resolved || len(one.Alerts) != 1 || one.Alerts[0] != (AlertState{"slack", AlertResolved}) {
+			if one.AckedAt.IsZero() || one.AckedBy != "bob" || one.Note != "disk replaced" || !one.Resolved ||
+				len(one.Alerts) != 1 || one.Alerts[0] != (AlertState{"slack", AlertResolved}) {
 				t.Fatalf("got %+v", one)
 			}
 			if err := s.ResetAlerts(ctx, crit.ID); err != nil {
@@ -306,6 +312,8 @@ func TestMigratesVersionOneDatabase(t *testing.T) {
 			}
 			// Turn it back into a version 1 database: alert column, no alerts table, no version.
 			for _, q := range []string{`DROP TABLE alerts`, `ALTER TABLE incidents DROP COLUMN resolved`,
+				`ALTER TABLE incidents DROP COLUMN acked_by`, `ALTER TABLE incidents DROP COLUMN note`, `DROP TABLE silences`,
+				`DROP TABLE sessions`, `DROP TABLE enroll_tokens`, `DROP TABLE agent_keys`,
 				`ALTER TABLE incidents ADD COLUMN alert TEXT NOT NULL DEFAULT ''`, `DROP TABLE schema_version`} {
 				if _, err := s.db.Exec(q); err != nil {
 					t.Fatal(err)
@@ -397,5 +405,204 @@ func TestOpenIncidentsIsNotPaged(t *testing.T) {
 	l, err := s.OpenIncidents(ctx)
 	if err != nil || len(l) != 1200 {
 		t.Fatalf("got %d, err %v", len(l), err)
+	}
+}
+
+func TestRetentionLimits(t *testing.T) {
+	for name, s := range openStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now()
+			var recs []*Record
+			for i, host := range []string{"h1", "h1", "h1", "h2", "h1", "h2"} {
+				r := rec("kmsg", fmt.Sprint("d", i), fmt.Sprint("c", i), fmt.Sprint(host, "-", i), 6)
+				r.Host = host
+				recs = append(recs, r)
+			}
+			recs[0].Level, recs[0].ReceivedAt = 3, now.Add(-48*time.Hour) // an old error
+			recs[1].ReceivedAt = now.Add(-48 * time.Hour)                 // an old info line
+			if _, err := s.InsertBatch(ctx, recs); err != nil {
+				t.Fatal(err)
+			}
+			s.RecordBoot(ctx, "h1", "b1", now)
+			s.RecordBoot(ctx, "h2", "b1", now)
+			left := func() []string {
+				all, _ := s.Query(ctx, Filter{MaxLevel: -1, Oldest: true})
+				var out []string
+				for _, r := range all {
+					out = append(out, r.Message)
+				}
+				return out
+			}
+			if n, err := s.DeleteLevelBefore(ctx, 6, now.Add(-24*time.Hour)); err != nil || n != 1 {
+				t.Fatalf("deleted %d %v", n, err)
+			}
+			if got := fmt.Sprint(left()); got != "[h1-0 h1-2 h2-3 h1-4 h2-5]" {
+				t.Fatalf("after level limit: %s", got)
+			}
+			if hosts, _ := s.RecordHosts(ctx); fmt.Sprint(hosts) != "[h1 h2]" {
+				t.Fatalf("hosts %v", hosts)
+			}
+			if n, err := s.TrimRecords(ctx, "h1", 2); err != nil || n != 1 {
+				t.Fatalf("host trim deleted %d %v", n, err)
+			}
+			if got := fmt.Sprint(left()); got != "[h1-2 h2-3 h1-4 h2-5]" {
+				t.Fatalf("after host limit: %s", got)
+			}
+			if n, err := s.TrimRecords(ctx, "", 3); err != nil || n != 1 {
+				t.Fatalf("total trim deleted %d %v", n, err)
+			}
+			if n, err := s.TrimRecords(ctx, "", 3); err != nil || n != 0 {
+				t.Fatalf("second trim deleted %d %v", n, err)
+			}
+			if got := fmt.Sprint(left()); got != "[h2-3 h1-4 h2-5]" {
+				t.Fatalf("after total limit: %s", got)
+			}
+		})
+	}
+}
+
+func TestSilences(t *testing.T) {
+	for name, s := range openStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().Truncate(time.Millisecond)
+			if err := s.CreateSilence(ctx, &Silence{Host: "", StartsAt: now, EndsAt: now.Add(time.Hour)}); err == nil {
+				t.Fatal("silence without host saved")
+			}
+			if err := s.CreateSilence(ctx, &Silence{Host: "db-[", StartsAt: now, EndsAt: now.Add(time.Hour)}); err == nil {
+				t.Fatal("bad pattern saved")
+			}
+			if err := s.CreateSilence(ctx, &Silence{Host: "*", StartsAt: now, EndsAt: now}); err == nil {
+				t.Fatal("empty silence saved")
+			}
+			db := Silence{Host: "db-*", Kind: "reboot", StartsAt: now, EndsAt: now.Add(time.Hour), Comment: "kernel update", CreatedBy: "alice", CreatedAt: now}
+			later := Silence{Host: "*", StartsAt: now.Add(2 * time.Hour), EndsAt: now.Add(3 * time.Hour)}
+			for _, sl := range []*Silence{&db, &later} {
+				if err := s.CreateSilence(ctx, sl); err != nil {
+					t.Fatal(err)
+				}
+			}
+			l, err := s.Silences(ctx, now)
+			if err != nil || len(l) != 2 || l[1].ID != db.ID || l[1].Comment != "kernel update" || l[1].CreatedBy != "alice" ||
+				!l[1].StartsAt.Equal(db.StartsAt) || !l[1].EndsAt.Equal(db.EndsAt) || l[1].Kind != "reboot" {
+				t.Fatalf("silences %+v %v", l, err)
+			}
+			inc := &Incident{Host: "db-01", Kind: "reboot", OpenedAt: now.Add(time.Minute)}
+			switch {
+			case !db.Matches(inc, now.Add(5*time.Hour)):
+				t.Fatal("opened during the silence, must match even when alerted later")
+			case db.Matches(&Incident{Host: "web-01", Kind: "reboot", OpenedAt: now}, now):
+				t.Fatal("other host matched")
+			case db.Matches(&Incident{Host: "db-01", Kind: "crash", OpenedAt: now}, now):
+				t.Fatal("other kind matched")
+			case later.Matches(inc, now):
+				t.Fatal("future silence matched")
+			}
+			// Ending a silence early, and ending one that has not started.
+			if err := s.EndSilence(ctx, db.ID, now.Add(10*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.EndSilence(ctx, later.ID, now.Add(10*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.EndSilence(ctx, 9999, now); err != ErrNotFound {
+				t.Fatalf("end unknown: %v", err)
+			}
+			l, _ = s.Silences(ctx, now)
+			if len(l) != 2 || !l[1].EndsAt.Equal(now.Add(10*time.Minute)) || l[0].Active(now.Add(2*time.Hour)) {
+				t.Fatalf("after end %+v", l)
+			}
+			if n, err := s.DeleteSilencesBefore(ctx, now.Add(4*time.Hour)); err != nil || n != 2 {
+				t.Fatalf("deleted %d %v", n, err)
+			}
+		})
+	}
+}
+
+func TestResolveIncident(t *testing.T) {
+	for name, s := range openStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now()
+			open := &Incident{Host: "h", Kind: "kernel_error", OpenedAt: now, UpdatedAt: now}
+			closed := &Incident{Host: "h", Kind: "crash", OpenedAt: now, UpdatedAt: now, ClosedAt: now}
+			s.CreateIncident(ctx, open)
+			s.CreateIncident(ctx, closed)
+			if err := s.ResolveIncident(ctx, open.ID, "alice", "", now); err != ErrNotFound {
+				t.Fatalf("open incident resolved in the store: %v", err)
+			}
+			if err := s.ResolveIncident(ctx, closed.ID, "alice", "", now.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := s.GetIncident(ctx, closed.ID)
+			if !got.Resolved || got.Note != "resolved by alice" || got.UpdatedAt.Before(now.Add(59*time.Second)) {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+func TestEnrollTokensAndKeys(t *testing.T) {
+	for name, s := range openStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now()
+			once := &EnrollToken{Comment: "rack 4", UsesLeft: 1, ExpiresAt: now.Add(time.Hour), CreatedBy: "alice", CreatedAt: now}
+			many := &EnrollToken{UsesLeft: -1, ExpiresAt: now.Add(time.Hour)}
+			old := &EnrollToken{UsesLeft: -1, ExpiresAt: now.Add(-time.Minute)}
+			for i, tok := range []*EnrollToken{once, many, old} {
+				if err := s.CreateEnrollToken(ctx, tok, fmt.Sprint("hash", i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			usable, err := s.UsableEnrollTokens(ctx, now)
+			if err != nil || len(usable) != 2 || usable[0].ID != once.ID || usable[0].Hash != "hash0" {
+				t.Fatalf("usable %+v %v", usable, err)
+			}
+			if err := s.UseEnrollToken(ctx, once.ID, now); err != nil {
+				t.Fatalf("first use: %v", err)
+			}
+			if err := s.UseEnrollToken(ctx, once.ID, now); err != ErrNotFound {
+				t.Fatalf("used up token: %v", err)
+			}
+			if err := s.UseEnrollToken(ctx, old.ID, now); err != ErrNotFound {
+				t.Fatalf("expired token: %v", err)
+			}
+			for range 3 {
+				if err := s.UseEnrollToken(ctx, many.ID, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.RevokeEnrollToken(ctx, many.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UseEnrollToken(ctx, many.ID, now); err != ErrNotFound {
+				t.Fatalf("revoked token: %v", err)
+			}
+			if usable, _ := s.UsableEnrollTokens(ctx, now); len(usable) != 0 {
+				t.Fatalf("usable after all: %+v", usable)
+			}
+			l, _ := s.EnrollTokens(ctx)
+			if len(l) != 3 || l[2].Comment != "rack 4" || l[2].Used != 1 || l[2].UsesLeft != 0 || l[2].Usable(now) ||
+				l[1].Used != 3 || !l[1].Revoked {
+				t.Fatalf("tokens %+v", l)
+			}
+
+			k := &AgentKey{Host: "db-01", Key: "aa", TokenID: once.ID, From: "10.0.0.7", EnrolledAt: now}
+			s.SaveAgentKey(ctx, k)
+			k.Key = "bb" // enrolling again replaces the key
+			s.SaveAgentKey(ctx, k)
+			keys, err := s.AgentKeys(ctx)
+			if err != nil || len(keys) != 1 || keys[0].Key != "bb" || keys[0].From != "10.0.0.7" {
+				t.Fatalf("keys %+v %v", keys, err)
+			}
+			if err := s.DeleteAgentKey(ctx, "db-01"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DeleteAgentKey(ctx, "db-01"); err != ErrNotFound {
+				t.Fatalf("delete twice: %v", err)
+			}
+		})
 	}
 }

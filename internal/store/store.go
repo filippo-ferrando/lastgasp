@@ -96,6 +96,9 @@ func Open(dsn string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// Ping checks that the database answers.
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 func (s *Store) migrate(ctx context.Context) error {
 	id := "INTEGER PRIMARY KEY AUTOINCREMENT"
 	if s.postgres {
@@ -182,6 +185,48 @@ func (s *Store) migrate(ctx context.Context) error {
 				host TEXT NOT NULL,
 				boot_id TEXT NOT NULL,
 				PRIMARY KEY (host, boot_id))`,
+		},
+		{
+			// Who acknowledged an incident and why, and maintenance windows that hold back alerts.
+			`ALTER TABLE incidents ADD COLUMN acked_by TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE incidents ADD COLUMN note TEXT NOT NULL DEFAULT ''`,
+			`CREATE TABLE IF NOT EXISTS silences (
+				id ` + id + `,
+				host TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				starts_at BIGINT NOT NULL,
+				ends_at BIGINT NOT NULL,
+				comment TEXT NOT NULL,
+				created_by TEXT NOT NULL,
+				created_at BIGINT NOT NULL)`,
+			`CREATE INDEX IF NOT EXISTS silences_ends ON silences (ends_at)`,
+		},
+		{
+			// Web UI logins. Only a hash of the session token is kept.
+			`CREATE TABLE IF NOT EXISTS sessions (
+				token_hash TEXT PRIMARY KEY,
+				user_name TEXT NOT NULL,
+				created_at BIGINT NOT NULL,
+				expires_at BIGINT NOT NULL)`,
+		},
+		{
+			// Join tokens and the keys of agents that enrolled with one.
+			`CREATE TABLE IF NOT EXISTS enroll_tokens (
+				id ` + id + `,
+				token_hash TEXT NOT NULL UNIQUE,
+				comment TEXT NOT NULL,
+				uses_left INTEGER NOT NULL,
+				used INTEGER NOT NULL,
+				expires_at BIGINT NOT NULL,
+				revoked INTEGER NOT NULL,
+				created_by TEXT NOT NULL,
+				created_at BIGINT NOT NULL)`,
+			`CREATE TABLE IF NOT EXISTS agent_keys (
+				host TEXT PRIMARY KEY,
+				key_hex TEXT NOT NULL,
+				token_id BIGINT NOT NULL,
+				from_addr TEXT NOT NULL,
+				enrolled_at BIGINT NOT NULL)`,
 		},
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
@@ -452,12 +497,60 @@ func (s *Store) DeleteStream(ctx context.Context, host, boot, instance string) e
 	return err
 }
 
-// DeleteRecordsBefore removes records received before t, in batches so the database is never locked for long.
+// DeleteRecordsBefore removes records received before t.
 func (s *Store) DeleteRecordsBefore(ctx context.Context, t time.Time) (int64, error) {
+	return s.deleteRecords(ctx, "received_at < ?", t.UnixMilli())
+}
+
+// DeleteLevelBefore removes records of level minLevel or less important (a higher number) received before t.
+func (s *Store) DeleteLevelBefore(ctx context.Context, minLevel int, t time.Time) (int64, error) {
+	return s.deleteRecords(ctx, "received_at < ? AND level >= ?", t.UnixMilli(), minLevel)
+}
+
+// TrimRecords keeps the newest keep records of host, or of all hosts when host is "", and removes the rest.
+func (s *Store) TrimRecords(ctx context.Context, host string, keep int) (int64, error) {
+	query, args := `SELECT id FROM records`, []any{}
+	if host != "" {
+		query, args = query+` WHERE host = ?`, append(args, host)
+	}
+	var last int64
+	err := s.db.QueryRowContext(ctx, s.q(query+` ORDER BY id DESC LIMIT 1 OFFSET `+strconv.Itoa(keep)), args...).Scan(&last)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if host != "" {
+		return s.deleteRecords(ctx, "host = ? AND id <= ?", host, last)
+	}
+	return s.deleteRecords(ctx, "id <= ?", last)
+}
+
+// RecordHosts lists the hosts that may have records.
+func (s *Store) RecordHosts(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT host FROM boots ORDER BY host`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// deleteRecords removes records matching where, in batches so the database is never locked for long.
+func (s *Store) deleteRecords(ctx context.Context, where string, args ...any) (int64, error) {
 	var total int64
 	for {
 		res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM records WHERE id IN
-			(SELECT id FROM records WHERE received_at < ? LIMIT 5000)`), t.UnixMilli())
+			(SELECT id FROM records WHERE `+where+` LIMIT 5000)`), args...)
 		if err != nil {
 			return total, err
 		}

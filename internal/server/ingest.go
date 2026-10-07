@@ -31,6 +31,8 @@ type Ingestor struct {
 	Log     *slog.Logger
 	// Detector is told about packets, new boots and stored records. It may be nil.
 	Detector *incident.Detector
+	// Enroller answers enrollment packets. Without it they count as malformed.
+	Enroller *Enroller
 
 	ch          chan inbound
 	boots       map[string]bool   // host|boot already saved
@@ -42,6 +44,8 @@ type Ingestor struct {
 	lastAck map[ackKey]time.Time // per agent run, limits acks to one per ackEvery
 	// reply sends acks of version 3 heartbeats, which go out after their batch is stored.
 	reply atomic.Pointer[func(b []byte, to net.Addr)]
+	// listening and running tell Ready that the UDP reader and the worker are up.
+	listening, running atomic.Bool
 }
 
 // inbound is a checked packet and the address it came from.
@@ -72,6 +76,10 @@ func NewIngestor(st *store.Store, tr *Tracker, keys KeyLookup, m *Metrics, log *
 // It returns the ack to send back at once, or nil. A version 3 heartbeat is answered after its
 // batch is stored, so the ack can tell what arrived.
 func (in *Ingestor) Handle(b []byte, from net.Addr) []byte {
+	if in.Enroller != nil && wire.IsEnroll(b) {
+		in.Enroller.Submit(b, from)
+		return nil
+	}
 	p, err := wire.Decode(b, in.Keys.Lookup)
 	if err != nil {
 		reason := "malformed"
@@ -143,6 +151,8 @@ func (in *Ingestor) ackAllowed(k ackKey) bool {
 func (in *Ingestor) Listen(conn net.PacketConn) error {
 	reply := func(b []byte, to net.Addr) { conn.WriteTo(b, to) }
 	in.SetReply(reply)
+	in.listening.Store(true)
+	defer in.listening.Store(false)
 	buf := make([]byte, 65536)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
@@ -160,11 +170,26 @@ func (in *Ingestor) Listen(conn net.PacketConn) error {
 	}
 }
 
+// Ready reports why the ingestor cannot take packets right now, or nil.
+func (in *Ingestor) Ready() error {
+	switch {
+	case !in.listening.Load():
+		return errors.New("not reading UDP packets")
+	case !in.running.Load():
+		return errors.New("ingest worker stopped")
+	case len(in.ch) > cap(in.ch)*9/10:
+		return fmt.Errorf("ingest queue %d%% full", len(in.ch)*100/cap(in.ch))
+	}
+	return nil
+}
+
 // SetReply sets where acks sent after storing go. Listen sets it to its socket.
 func (in *Ingestor) SetReply(fn func(b []byte, to net.Addr)) { in.reply.Store(&fn) }
 
 // Run processes queued packets in batches and saves gap state, until ctx is done.
 func (in *Ingestor) Run(ctx context.Context) {
+	in.running.Store(true)
+	defer in.running.Store(false)
 	save := time.NewTicker(5 * time.Second)
 	defer save.Stop()
 	batch := make([]inbound, 0, 512)

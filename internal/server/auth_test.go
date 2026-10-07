@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +100,12 @@ func TestHTTPRoles(t *testing.T) {
 		{"GET", "/", "bob", "b-pass", 200},
 		{"POST", "/api/incidents/1/ack", "bob", "b-pass", 403},
 		{"POST", "/api/incidents/1/ack", "alice", "a-pass", 404}, // allowed, but no such incident
+		{"POST", "/api/incidents/1/resolve", "bob", "b-pass", 403},
+		{"GET", "/api/silences", "bob", "b-pass", 200},
+		{"POST", "/api/silences", "bob", "b-pass", 403},
+		{"POST", "/api/silences", "alice", "a-pass", 400}, // allowed, but no host
+		{"DELETE", "/api/silences/1", "bob", "b-pass", 403},
+		{"DELETE", "/api/silences/1", "alice", "a-pass", 404},
 		{"GET", "/healthz", "", "", 200},
 		{"GET", "/metrics", "", "", 200},
 	} {
@@ -241,5 +249,111 @@ func TestProxyHeaderOnlyFromTrustedProxies(t *testing.T) {
 	}
 	if _, err := ParsePrefixes("nope"); err == nil {
 		t.Fatal("bad prefix accepted")
+	}
+}
+
+func TestSessionLoginAndLogout(t *testing.T) {
+	alice, _ := HashPassword("alice", RoleAdmin, "a-pass")
+	bob, _ := HashPassword("bob", RoleViewer, "b-pass")
+	path := authFile(t, alice, bob)
+	auth, err := OpenAuth(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	auth.Sessions, auth.SessionTTL = e.st, time.Hour
+	srv := httptest.NewServer((&API{Store: e.st, Tracker: e.tr, Gatherer: prometheus.NewRegistry(), Auth: auth}).Handler())
+	defer srv.Close()
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	do := func(method, path, body string, cookie *http.Cookie, hdr ...string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		for i := 0; i+1 < len(hdr); i += 2 {
+			req.Header.Set(hdr[i], hdr[i+1])
+		}
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+
+	// A browser opening the UI goes to the login page, a fetch gets a 401 without a basic auth prompt.
+	r := do("GET", "/?host=db-01", "", nil, "Sec-Fetch-Mode", "navigate")
+	if r.StatusCode != 303 || r.Header.Get("Location") != "/login?next=%2F%3Fhost%3Ddb-01" {
+		t.Fatalf("navigate: %d %s", r.StatusCode, r.Header.Get("Location"))
+	}
+	if r := do("GET", "/api/logs", "", nil, "Sec-Fetch-Mode", "cors"); r.StatusCode != 401 || r.Header.Get("WWW-Authenticate") != "" {
+		t.Fatalf("fetch: %d %q", r.StatusCode, r.Header.Get("WWW-Authenticate"))
+	}
+	if r := do("GET", "/api/logs", "", nil); r.Header.Get("WWW-Authenticate") == "" {
+		t.Fatal("other clients lost the basic auth challenge")
+	}
+	if r := do("GET", "/login", "", nil); r.StatusCode != 200 {
+		t.Fatalf("login page: %d", r.StatusCode)
+	}
+
+	if r := do("POST", "/api/login", `{"user":"bob","password":"wrong"}`, nil); r.StatusCode != 401 {
+		t.Fatalf("wrong password: %d", r.StatusCode)
+	}
+	r = do("POST", "/api/login", `{"user":"bob","password":"b-pass"}`, nil)
+	var cookie *http.Cookie
+	for _, c := range r.Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c
+		}
+	}
+	if r.StatusCode != 200 || cookie == nil || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("login: %d %+v", r.StatusCode, cookie)
+	}
+	if r := do("GET", "/api/logs", "", cookie); r.StatusCode != 200 {
+		t.Fatalf("with session: %d", r.StatusCode)
+	}
+	// The role comes from the auth file, so the viewer session cannot act as admin.
+	if r := do("POST", "/api/incidents/1/ack", "{}", cookie); r.StatusCode != 403 {
+		t.Fatalf("viewer ack: %d", r.StatusCode)
+	}
+	if r := do("POST", "/api/logout", "", cookie); r.StatusCode != 204 {
+		t.Fatalf("logout: %d", r.StatusCode)
+	}
+	if r := do("GET", "/api/logs", "", cookie); r.StatusCode != 401 {
+		t.Fatalf("after logout: %d", r.StatusCode)
+	}
+
+	// Removing a user from the auth file ends its sessions.
+	r = do("POST", "/api/login", `{"user":"bob","password":"b-pass"}`, nil)
+	cookie = r.Cookies()[0]
+	os.WriteFile(path, []byte(alice+"\n"), 0o600)
+	if err := auth.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if r := do("GET", "/api/logs", "", cookie); r.StatusCode != 401 {
+		t.Fatalf("removed user: %d", r.StatusCode)
+	}
+	// Login failures count against the same limit as basic auth.
+	for range maxFails {
+		do("POST", "/api/login", `{"user":"alice","password":"wrong"}`, nil)
+	}
+	if r := do("POST", "/api/login", `{"user":"alice","password":"a-pass"}`, nil); r.StatusCode != 429 {
+		t.Fatalf("after failures: %d", r.StatusCode)
+	}
+}
+
+func TestSessionStoreExpiry(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	ctx := context.Background()
+	now := time.Now()
+	e.st.CreateSession(ctx, "h1", "alice", now.Add(time.Minute), now)
+	if u, err := e.st.SessionUser(ctx, "h1", now); err != nil || u != "alice" {
+		t.Fatalf("got %q %v", u, err)
+	}
+	if _, err := e.st.SessionUser(ctx, "h1", now.Add(2*time.Minute)); err == nil {
+		t.Fatal("expired session accepted")
 	}
 }

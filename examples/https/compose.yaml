@@ -1,0 +1,65 @@
+# lastgasp-server behind Caddy, with HTTPS from Let's Encrypt and a login.
+# The DNS name must point to this machine, and TCP ports 80 and 443 must be reachable.
+#
+#   openssl rand -hex 32 > agent.key
+#   echo "*  $(cat agent.key)" > keys
+#   docker compose build server
+#   printf '%s\n' 'alice-password' | docker run --rm -i lastgasp-server:latest user alice admin > auth
+#   docker run --rm lastgasp-server:latest token ci viewer    # optional API token, append its line to auth
+#   sudo chown 65532:65532 keys auth && chmod 600 keys auth
+#   echo "LASTGASP_DOMAIN=lastgasp.example.net" > .env
+#   docker compose up -d
+#
+# Add users later by appending lines to auth, then: docker compose kill -s HUP server
+
+services:
+  server:
+    build: ../..
+    image: lastgasp-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - -listen=:5140
+      - -http=:8080
+      - -db=/var/lib/lastgasp/lastgasp.db
+      - -key-file=/etc/lastgasp/keys
+      - -retain=720h
+      - -auth-file=/etc/lastgasp/auth
+      # Login failures are limited per client, so the client address comes from Caddy.
+      - -auth-proxy-header=X-Forwarded-For
+      - -auth-trusted-proxies=172.31.250.0/24
+      - -public-url=https://${LASTGASP_DOMAIN:?set LASTGASP_DOMAIN in .env}
+    volumes:
+      - data:/var/lib/lastgasp
+      - ./keys:/etc/lastgasp/keys:ro
+      - ./auth:/etc/lastgasp/auth:ro
+    ports:
+      # Only the agent port is published, the UI is reached through Caddy.
+      - "5140:5140/udp"
+    networks: [web]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      LASTGASP_DOMAIN: ${LASTGASP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [web]
+
+# A fixed subnet, so the server knows which addresses may set X-Forwarded-For.
+networks:
+  web:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  data:
+  caddydata:
+  caddyconfig:

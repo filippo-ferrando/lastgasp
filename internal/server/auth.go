@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"lastgasp/internal/version"
 )
 
 // Role is what a user may do. Viewers read everything, admins can also change incidents.
@@ -181,6 +183,11 @@ type Auth struct {
 	// It is only read on requests that come from an address in TrustedProxies.
 	ProxyHeader    string
 	TrustedProxies []netip.Prefix
+	// Sessions keeps web UI logins, SessionTTL is how long one lasts. Without Sessions only basic auth and tokens work.
+	Sessions   SessionStore
+	SessionTTL time.Duration
+	// SecureCookie marks the session cookie for HTTPS only, for a server behind an HTTPS proxy.
+	SecureCookie bool
 
 	limit limiter
 }
@@ -247,10 +254,13 @@ func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 			return
 		}
 		var user *User
+		session := false
 		if basic {
 			user = users.Basic(name, pass)
 		} else if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 			user = users.Bearer(strings.TrimSpace(tok))
+		} else if user = a.sessionUser(r, users); user != nil {
+			session = true
 		}
 		if user == nil {
 			if r.Header.Get("Authorization") != "" {
@@ -259,7 +269,13 @@ func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 					a.Failures.Inc()
 				}
 			}
-			w.Header().Set("WWW-Authenticate", `Basic realm="lastgasp", charset="UTF-8"`)
+			if a.Sessions != nil && browser(r) {
+				if loginRedirect(w, r) {
+					return
+				}
+			} else {
+				w.Header().Set("WWW-Authenticate", `Basic realm="lastgasp", charset="UTF-8"`)
+			}
 			http.Error(w, "login required", http.StatusUnauthorized)
 			return
 		}
@@ -271,17 +287,20 @@ func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 			http.Error(w, "this needs the "+min.String()+" role", http.StatusForbidden)
 			return
 		}
-		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
+		ctx := context.WithValue(r.Context(), userKey{}, user)
+		h.ServeHTTP(w, r.WithContext(context.WithValue(ctx, sessionKey{}, session)))
 	})
 }
 
 // me tells the UI who is logged in, so it can hide what the user may not do.
 func me(w http.ResponseWriter, r *http.Request) {
 	out := struct {
-		User string `json:"user"`
-		Role string `json:"role"`
-		Auth bool   `json:"auth"`
-	}{Role: RoleAdmin.String()}
+		User    string `json:"user"`
+		Role    string `json:"role"`
+		Auth    bool   `json:"auth"`
+		Version string `json:"version"`
+		Session bool   `json:"session"` // logged in through the login page, so logout works
+	}{Role: RoleAdmin.String(), Version: version.String(), Session: FromSession(r.Context())}
 	if u := UserFrom(r.Context()); u != nil {
 		out.User, out.Role, out.Auth = u.Name, u.Role.String(), true
 	}

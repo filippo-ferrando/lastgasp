@@ -1,0 +1,34 @@
+# Problems that lastgasp cannot report through its own incidents, or that need a look at the numbers.
+# Incidents of the hosts (crashes, errors, silent hosts) come from lastgasp itself.
+groups:
+  - name: lastgasp
+    rules:
+      - alert: LastgaspServerDown
+        expr: up{job="lastgasp"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: lastgasp server is not answering, incidents are not detected
+
+      - alert: LastgaspPacketsLost
+        expr: increase(lastgasp_packets_gap_total[15m]) > 100
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} lost {{ $value }} packets in 15 minutes"
+
+      - alert: LastgaspAgentDropping
+        expr: increase(lastgasp_agent_buffer_dropped_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "agent on {{ $labels.host }} dropped records, its buffer was full"
+
+      - alert: LastgaspAgentHolding
+        expr: lastgasp_agent_buffered_records > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "agent on {{ $labels.host }} keeps records it cannot send"

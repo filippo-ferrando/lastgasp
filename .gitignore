@@ -4,3 +4,9 @@ bin/
 *.db-shm
 .env
 /keys
+# Secrets created while trying the examples.
+examples/*/keys
+examples/*/auth
+examples/*/agent.key
+examples/*/*.token
+dist/

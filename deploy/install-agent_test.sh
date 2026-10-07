@@ -50,12 +50,57 @@ install -s a:1 -n 'bad name' && fail "hostname with space accepted"
 install -s a:1 -b "$TMP/missing" && fail "missing binary accepted"
 
 # Uninstall keeps the key unless --purge is given.
+mkdir -p "$ROOT/run/lastgasp" && : > "$ROOT/run/lastgasp/agent.stash"
 install --uninstall || fail "uninstall: $(cat "$TMP/out")"
+[ -e "$ROOT/run/lastgasp" ] && fail "stash left after uninstall"
 [ -e "$ROOT/usr/local/sbin/lastgasp-agent" ] && fail "binary left after uninstall"
 [ -e "$dropin" ] && fail "drop-in left after uninstall"
 [ -f "$ROOT/etc/lastgasp/agent.key" ] || fail "key removed without --purge"
 install --uninstall --purge || fail "purge: $(cat "$TMP/out")"
 [ -e "$ROOT/etc/lastgasp" ] && fail "config left after purge"
+
+# Download from a release, verify it, and enroll with a token. A local web server plays the Forgejo instance.
+if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+	rel="$TMP/www/me/lastgasp/releases/download/v9.9.9"
+	mkdir -p "$rel" "$TMP/www/api/v1/repos/me/lastgasp/releases"
+	# The fake agent writes a key when asked to enroll, like the real one.
+	cat > "$TMP/fake-agent" <<'AGENT'
+#!/bin/sh
+if [ "${1:-}" = enroll ]; then
+	while [ $# -gt 0 ]; do [ "$1" = -key-file ] && echo cafe0000cafe0000cafe0000cafe0000 > "$2"; [ "$1" = -token ] && [ "$2" = bad ] && exit 1; shift; done
+	exit 0
+fi
+exit 0
+AGENT
+	case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=arm ;; esac
+	cp "$TMP/fake-agent" "$rel/lastgasp-agent-linux-$arch"
+	cp "$DIR/lastgasp-agent.service" "$rel/"
+	(cd "$rel" && sha256sum "lastgasp-agent-linux-$arch" lastgasp-agent.service > SHA256SUMS)
+	echo '{"id":1,"tag_name":"v9.9.9","name":"v9.9.9"}' > "$TMP/www/api/v1/repos/me/lastgasp/releases/latest"
+	port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+	python3 -m http.server -b 127.0.0.1 -d "$TMP/www" "$port" >/dev/null 2>&1 &
+	web=$!
+	for _ in 1 2 3 4 5 6 7 8 9 10; do curl -fs "http://127.0.0.1:$port/" >/dev/null 2>&1 && break; sleep 0.2; done
+	repo="http://127.0.0.1:$port/me/lastgasp"
+	# Piped like the one line install, so there is no local binary or unit next to the script.
+	piped() { (cd "$TMP" && sh -s -- "$@" < "$DIR/install-agent.sh" > "$TMP/out" 2>&1); }
+	rm -rf "$ROOT"
+	piped --repo "$repo" -s logs:5140 -t lgj_abc || fail "download install: $(cat "$TMP/out")"
+	check "$TMP/out" "downloading lastgasp-agent v9.9.9"
+	cmp -s "$ROOT/usr/local/sbin/lastgasp-agent" "$TMP/fake-agent" || fail "downloaded binary not installed"
+	[ "$(cat "$ROOT/etc/lastgasp/agent.key")" = cafe0000cafe0000cafe0000cafe0000 ] || fail "enrolled key not stored"
+	grep -q "server key file" "$TMP/out" && fail "key line printed after enrollment"
+	piped --repo "$repo" -V v9.9.9 -s logs:5140 -t bad && fail "failed enrollment accepted"
+	piped --repo "$repo" -s logs:5140 -t lgj_abc -k 00112233445566778899aabbccddeeff && fail "--token with --key accepted"
+	# A changed download is refused.
+	echo tampered >> "$rel/lastgasp-agent-linux-$arch"
+	piped --repo "$repo" -V v9.9.9 -s logs:5140 && fail "tampered binary accepted"
+	check "$TMP/out" "checksum mismatch"
+	piped --repo "$repo" -V v0.0.1 -s logs:5140 && fail "missing release accepted"
+	kill "$web"
+else
+	echo "install-agent_test: python3 or curl not found, download not tested"
+fi
 
 if [ "$fails" -gt 0 ]; then
 	echo "install-agent_test: $fails failures" >&2

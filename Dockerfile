@@ -23,4 +23,5 @@ USER nonroot:nonroot
 # The image has no curl, so the server checks itself. It expects the web UI on port 8080.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/lastgasp-server", "health"]
 ENTRYPOINT ["/usr/local/bin/lastgasp-server"]
-CMD ["-listen", ":5140", "-http", ":8080", "-db", "/var/lib/lastgasp/lastgasp.db", "-key-file", "/etc/lastgasp/keys"]
+# No key file by default: agents enroll with join tokens. Add -key-file to use one as well.
+CMD ["-listen", ":5140", "-http", ":8080", "-db", "/var/lib/lastgasp/lastgasp.db"]

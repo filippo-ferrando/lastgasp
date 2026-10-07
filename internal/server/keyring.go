@@ -41,11 +41,9 @@ func ParseKeyring(r io.Reader) (*Keyring, error) {
 			k.hosts[f[0]] = key
 		}
 	}
+	// A file without keys is fine: agents can enroll instead.
 	if err := sc.Err(); err != nil {
 		return nil, err
-	}
-	if k.def == nil && len(k.hosts) == 0 {
-		return nil, fmt.Errorf("keys: no key found")
 	}
 	return k, nil
 }

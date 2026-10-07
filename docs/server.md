@@ -26,7 +26,7 @@ The install command uses `-agent-address` (default: the `-public-url` host with 
 
 ### Key file
 
-With `-key-file`: one `host hexkey` line per host. `*` matches every host without its own line or enrolled key. Empty lines and `#` comments are ignored. Keys are at least 16 bytes (32 hex characters). Without `-key-file`, only enrolled agents are accepted.
+With `-key-file`: one `host hexkey` line per host. `*` matches every host without its own line or enrolled key. Empty lines and `#` comments are ignored. Keys are at least 16 bytes (32 hex characters). Without `-key-file`, or with a key file that has no keys yet, only enrolled agents are accepted.
 
 ```text
 # /etc/lastgasp/keys
@@ -76,10 +76,11 @@ Each release pushes `git.fferrando.cc/rdfilippo/lastgasp-server` for amd64 and a
 
 ```sh
 docker run -d --name lastgasp --restart unless-stopped \
-  -p 5140:5140/udp -p 127.0.0.1:8080:8080 \
-  -v ./keys:/etc/lastgasp/keys:ro -v lastgasp:/var/lib/lastgasp \
+  -p 5140:5140/udp -p 127.0.0.1:8080:8080 -v lastgasp:/var/lib/lastgasp \
   git.fferrando.cc/rdfilippo/lastgasp-server:latest
 ```
+
+The default flags use no key file: agents enroll with join tokens. To use a key file as well, mount it and give the flags, as below. A key file without keys yet is fine.
 
 The image has a health check: it runs `lastgasp-server health`, which asks `/readyz` on port 8080. With another `-http` port, override it (`--health-cmd`, or `healthcheck:` in compose).
 

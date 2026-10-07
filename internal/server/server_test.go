@@ -95,7 +95,14 @@ func TestKeyring(t *testing.T) {
 	if k.Lookup("other") != nil {
 		t.Fatal("host without key must be rejected when there is no default")
 	}
-	for _, bad := range []string{"", "node-1", "node-1 short", "a b c"} {
+	// An empty file, or one with comments only, holds no keys: only enrolled agents get in.
+	for _, empty := range []string{"", "# keys come later\n\n"} {
+		k, err := ParseKeyring(strings.NewReader(empty))
+		if err != nil || k.Lookup("node-1") != nil {
+			t.Fatalf("%q: %v", empty, err)
+		}
+	}
+	for _, bad := range []string{"node-1", "node-1 short", "a b c"} {
 		if _, err := ParseKeyring(strings.NewReader(bad)); err == nil {
 			t.Fatalf("%q accepted", bad)
 		}

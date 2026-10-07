@@ -150,8 +150,8 @@ func main() {
 		fail("load enrolled agents", err)
 	}
 	keys := &server.Keys{File: keyFileRing, Enrolled: enrolled}
-	if keyFileRing == nil {
-		log.Info("no -key-file, only enrolled agents are accepted")
+	if keyFileRing == nil || keyFileRing.Hosts() == 0 {
+		log.Info("no key in a key file, only enrolled agents are accepted")
 	}
 	in := server.NewIngestor(st, tr, keys, metrics, log)
 	enroller := &server.Enroller{Store: st, Keys: keys, Log: log, Results: metrics.Enrollments}

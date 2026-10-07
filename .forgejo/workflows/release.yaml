@@ -50,7 +50,7 @@ jobs:
       - name: Write release notes
         env:
           TAG: ${{ github.ref_name }}
-          SERVER_URL: ${{ github.server_url }}
+          SERVER_URL: "https://git.fferrando.cc"
           REPOSITORY: ${{ github.repository }}
         run: |
           prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)

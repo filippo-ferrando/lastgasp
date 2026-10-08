@@ -280,6 +280,7 @@ type flakyConn struct {
 	mu    sync.Mutex
 	fails int
 	sent  [][]byte
+	to    []string // address of each sent packet
 	acks  chan []byte
 }
 
@@ -306,7 +307,7 @@ func (f *flakyConn) packets(t *testing.T) []*wire.Packet {
 	return out
 }
 
-func (f *flakyConn) WriteTo(b []byte, _ net.Addr) (int, error) {
+func (f *flakyConn) WriteTo(b []byte, a net.Addr) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fails > 0 {
@@ -314,6 +315,7 @@ func (f *flakyConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 		return 0, syscall.ENETUNREACH
 	}
 	f.sent = append(f.sent, append([]byte(nil), b...))
+	f.to = append(f.to, a.String())
 	return len(b), nil
 }
 

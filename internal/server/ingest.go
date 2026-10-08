@@ -33,6 +33,9 @@ type Ingestor struct {
 	Detector *incident.Detector
 	// Enroller answers enrollment packets. Without it they count as malformed.
 	Enroller *Enroller
+	// Sessions holds the version 5 sessions. RequireFS refuses older packets, which have no forward secrecy.
+	Sessions  *Sessions
+	RequireFS bool
 
 	ch          chan inbound
 	boots       map[string]bool   // host|boot already saved
@@ -41,23 +44,30 @@ type Ingestor struct {
 	now         func() time.Time
 
 	ackMu   sync.Mutex
-	lastAck map[ackKey]time.Time // per agent run, limits acks to one per ackEvery
+	lastAck map[rateKey]time.Time // per agent run, limits acks and handshake replies to one per ackEvery each
 	// reply sends acks of version 3 heartbeats, which go out after their batch is stored.
 	reply atomic.Pointer[func(b []byte, to net.Addr)]
 	// listening and running tell Ready that the UDP reader and the worker are up.
 	listening, running atomic.Bool
 }
 
-// inbound is a checked packet and the address it came from.
+// inbound is a checked packet and the address it came from. sess is the version 5 session it came with.
 type inbound struct {
 	p    *wire.Packet
 	from net.Addr
+	sess *wire.Session
 }
 
 type ackKey struct {
 	host     string
 	bootID   [16]byte
 	instance uint64
+}
+
+// rateKey tells acks and handshake replies apart, so a rekey never holds back an ack.
+type rateKey struct {
+	ackKey
+	handshake bool
 }
 
 // ackEvery limits acks per agent run, so replayed heartbeats cannot turn the server into a reflector.
@@ -69,7 +79,7 @@ const cacheLimit = 100000
 func NewIngestor(st *store.Store, tr *Tracker, keys KeyLookup, m *Metrics, log *slog.Logger) *Ingestor {
 	return &Ingestor{Store: st, Tracker: tr, Keys: keys, Metrics: m, Log: log,
 		ch: make(chan inbound, 65536), boots: map[string]bool{}, pstoreBoots: map[string]string{}, now: time.Now,
-		lastAck: map[ackKey]time.Time{}}
+		lastAck: map[rateKey]time.Time{}, Sessions: NewSessions()}
 }
 
 // Handle checks one datagram and queues it. It never blocks; a full queue drops the packet.
@@ -80,26 +90,22 @@ func (in *Ingestor) Handle(b []byte, from net.Addr) []byte {
 		in.Enroller.Submit(b, from)
 		return nil
 	}
+	if wire.PacketVersion(b) == wire.VersionFS {
+		return in.handleFS(b, from)
+	}
+	if in.RequireFS && wire.PacketVersion(b) != 0 {
+		in.invalid(wire.ErrVersion)
+		return nil
+	}
 	p, err := wire.Decode(b, in.Keys.Lookup)
 	if err != nil {
-		reason := "malformed"
-		switch {
-		case errors.Is(err, wire.ErrAuth):
-			reason = "auth_failed"
-		case errors.Is(err, wire.ErrUnknownHost):
-			reason = "unknown_host"
-		case errors.Is(err, wire.ErrVersion):
-			reason = "version"
-		case errors.Is(err, wire.ErrHost):
-			reason = "bad_host"
-		}
-		in.Metrics.Invalid.WithLabelValues(reason).Inc()
+		in.invalid(err)
 		return nil
 	}
 	// Seq 0 is a probe: the agent asks if a server is there, before it sends its records.
 	if p.Kind != wire.KindHeartbeat || p.Seq != 0 {
 		select {
-		case in.ch <- inbound{p, from}:
+		case in.ch <- inbound{p, from, nil}:
 		default:
 			in.Metrics.QueueDropped.Inc()
 			return nil
@@ -114,26 +120,113 @@ func (in *Ingestor) Handle(b []byte, from net.Addr) []byte {
 		return nil
 	}
 	// A probe ack tells nothing about records: the probe is not tracked.
-	return in.ack(p, 0, nil)
+	return in.ack(inbound{p: p}, 0, nil)
 }
 
-// ack builds the answer to the heartbeat p, or nil when the limit per agent run is reached.
-func (in *Ingestor) ack(p *wire.Packet, upto uint64, missing []wire.Range) []byte {
-	if !in.ackAllowed(ackKey{p.Host, p.BootID, p.Instance}) {
+// invalid counts a refused packet by reason.
+func (in *Ingestor) invalid(err error) {
+	reason := "malformed"
+	switch {
+	case errors.Is(err, wire.ErrAuth):
+		reason = "auth_failed"
+	case errors.Is(err, wire.ErrUnknownHost):
+		reason = "unknown_host"
+	case errors.Is(err, wire.ErrVersion):
+		reason = "version"
+	case errors.Is(err, wire.ErrHost):
+		reason = "bad_host"
+	case errors.Is(err, wire.ErrSession):
+		reason = "unknown_session"
+	case errors.Is(err, wire.ErrReplay):
+		reason = "replay"
+	}
+	in.Metrics.Invalid.WithLabelValues(reason).Inc()
+}
+
+// handleFS checks a version 5 packet: a handshake init gets its reply at once, data is queued.
+func (in *Ingestor) handleFS(b []byte, from net.Addr) []byte {
+	h, err := wire.ParseHeader(b)
+	if err != nil {
+		in.invalid(err)
 		return nil
 	}
-	key := in.Keys.Lookup(p.Host)
-	if key == nil {
+	k := ackKey{h.Host, h.BootID, h.Instance}
+	now := in.now()
+	switch h.Type {
+	case wire.TypeInit:
+		init, err := wire.ReadInit(b, in.Keys.Lookup)
+		if err != nil {
+			in.invalid(err)
+			return nil
+		}
+		if !in.Sessions.Fresh(k, init.Number) {
+			in.invalid(wire.ErrReplay)
+			return nil
+		}
+		if !in.allowed(rateKey{k, true}) {
+			return nil
+		}
+		s, reply, err := init.Accept()
+		if err != nil {
+			in.invalid(err)
+			return nil
+		}
+		in.Sessions.Add(k, init.Number, s, now)
+		in.Metrics.Handshakes.Inc()
+		in.Metrics.Sessions.Set(float64(in.Sessions.Len()))
+		return reply
+	case wire.TypeData:
+		// A removed key ends its sessions at once, not when they expire.
+		if in.Keys.Lookup(h.Host) == nil {
+			in.invalid(wire.ErrUnknownHost)
+			return nil
+		}
+		s := in.Sessions.Lookup(k, h.Session, now)
+		if s == nil {
+			in.invalid(wire.ErrSession)
+			return nil
+		}
+		p, err := s.Open(b)
+		if err != nil {
+			in.invalid(err)
+			return nil
+		}
+		in.Sessions.Confirm(k, s)
+		select {
+		case in.ch <- inbound{p, from, s}:
+		default:
+			in.Metrics.QueueDropped.Inc()
+		}
 		return nil
 	}
-	ack, err := wire.EncodeAck(p, upto, missing, key)
+	in.invalid(wire.ErrMalformed)
+	return nil
+}
+
+// ack builds the answer to the heartbeat b, or nil when the limit per agent run is reached.
+func (in *Ingestor) ack(b inbound, upto uint64, missing []wire.Range) []byte {
+	p := b.p
+	if !in.allowed(rateKey{ackKey{p.Host, p.BootID, p.Instance}, false}) {
+		return nil
+	}
+	var ack []byte
+	var err error
+	if b.sess != nil {
+		ack, err = b.sess.SealAck(p, upto, missing)
+	} else {
+		key := in.Keys.Lookup(p.Host)
+		if key == nil {
+			return nil
+		}
+		ack, err = wire.EncodeAck(p, upto, missing, key)
+	}
 	if err != nil {
 		return nil
 	}
 	return ack
 }
 
-func (in *Ingestor) ackAllowed(k ackKey) bool {
+func (in *Ingestor) allowed(k rateKey) bool {
 	in.ackMu.Lock()
 	defer in.ackMu.Unlock()
 	now := in.now()
@@ -203,6 +296,8 @@ func (in *Ingestor) Run(ctx context.Context) {
 			return
 		case <-save.C:
 			in.saveStreams(work)
+			in.Sessions.Sweep(in.now())
+			in.Metrics.Sessions.Set(float64(in.Sessions.Len()))
 		case p := <-in.ch:
 			batch = append(batch[:0], p)
 		fill:
@@ -328,7 +423,7 @@ func (in *Ingestor) sendAcks(beats map[ackKey]inbound) {
 	}
 	for k, b := range beats {
 		upto, missing := in.Tracker.Progress(StreamKey{k.host, wire.FormatBootID(k.bootID), k.instance})
-		if ack := in.ack(b.p, upto, missing); ack != nil {
+		if ack := in.ack(b, upto, missing); ack != nil {
 			(*reply)(ack, b.from)
 		}
 	}

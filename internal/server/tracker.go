@@ -38,6 +38,8 @@ type Stream struct {
 	Agent      wire.Stats `json:"agent"` // counters from the newest heartbeat
 	// AgentVersion comes from the newest heartbeat, empty for agents older than wire version 4.
 	AgentVersion string `json:"agent_version,omitempty"`
+	// Wire is the packet version of the run. Version 5 has forward secrecy, 0 means not known yet.
+	Wire uint8 `json:"wire_version,omitempty"`
 }
 
 // Missing is the number of packets still missing.
@@ -72,6 +74,7 @@ func (t *Tracker) Observe(p *wire.Packet, now time.Time) bool {
 	}
 	t.dirty[k] = true
 	s.LastSeen = now
+	s.Wire = p.Version
 
 	if p.Kind == wire.KindHeartbeat && p.Oldest > 0 {
 		s.forgetBelow(p.Oldest)
@@ -255,8 +258,9 @@ type HostSummary struct {
 	Duplicates uint64     `json:"duplicates"`
 	Streams    int        `json:"streams"`
 	Agent      wire.Stats `json:"agent"` // summed over all agent runs, Buffered from the newest
-	// AgentVersion is the version of the newest agent run.
+	// AgentVersion and Wire are the agent and packet versions of the newest agent run.
 	AgentVersion string `json:"agent_version,omitempty"`
+	Wire         uint8  `json:"wire_version,omitempty"`
 }
 
 // Hosts summarizes streams per host. A host is up when it sent something within staleAfter.
@@ -283,7 +287,7 @@ func (t *Tracker) Hosts(now time.Time, staleAfter time.Duration) []HostSummary {
 		if !s.LastSeen.Before(h.LastSeen) {
 			h.LastSeen, h.BootID = s.LastSeen, s.BootID
 			a.Buffered, a.UptimeSec = s.Agent.Buffered, s.Agent.UptimeSec
-			h.AgentVersion = s.AgentVersion
+			h.AgentVersion, h.Wire = s.AgentVersion, s.Wire
 		}
 	}
 	for i := range out {

@@ -136,15 +136,20 @@ func TestMaxMsgFits(t *testing.T) {
 	p := samplePacket()
 	p.Host = strings.Repeat("h", MaxHostLen)
 	p.Record.Msg = strings.Repeat("x", MaxMsg(len(p.Host)))
-	b, err := Encode(p, testKey)
+	agent, _ := sessionPair(t, p.Host)
+	b, err := agent.Seal(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(b) != MaxPacket {
 		t.Fatalf("packet size %d, want %d", len(b), MaxPacket)
 	}
+	// Version 4 has a smaller header, so the same record fits too.
+	if b, err := Encode(p, testKey); err != nil || len(b) > MaxPacket {
+		t.Fatalf("version 4: %d bytes, %v", len(b), err)
+	}
 	p.Record.Msg += "x"
-	if _, err := Encode(p, testKey); !errors.Is(err, ErrTooLarge) {
+	if _, err := agent.Seal(p); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("want ErrTooLarge, got %v", err)
 	}
 }

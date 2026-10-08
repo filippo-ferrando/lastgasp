@@ -52,6 +52,8 @@ The agent sends to `<release>-udp.<namespace>.svc.cluster.local.:5140`. It looks
 
 `agent.hostNetwork: true` sends from the node network instead of the pod network, so a broken CNI on a dying node does not cut the agent off. The service address still needs kube-proxy, so pair it with `agent.server` set to an address the node reaches directly, like a LoadBalancer IP.
 
+Agents send version 5 packets with forward secrecy (`agent.forwardSecrecy: true`, see [forward-secrecy.md](forward-secrecy.md)). The chart installs agent and server of the same release, so this only needs turning off when the agents send to an older server outside the cluster.
+
 If `systemd-pstore` runs on the nodes, it moves crash files out of `/sys/fs/pstore` at boot, often before the agent starts. Disable it on the nodes (`systemctl mask systemd-pstore`) to get crash logs.
 
 ## Server
@@ -66,6 +68,7 @@ If `systemd-pstore` runs on the nodes, it moves crash files out of `/sys/fs/psto
 | `server.auth.existingSecret` | | secret with an `auth` entry (the auth file). Set it before exposing the UI |
 | `server.rules` | | incident rules file content |
 | `server.publicURL` | | `-public-url`, for links in alerts |
+| `server.requireForwardSecrecy` | false | `-require-forward-secrecy`: refuse packets before version 5. Turn on once every agent, in and outside the cluster, sends version 5 |
 | `server.extraArgs` | | more server flags, like `-alert-webhook=...` |
 | `server.ingress.*` | off | an Ingress to the web UI. Set `-auth-proxy-header` and `-auth-trusted-proxies` in `extraArgs` for real client addresses |
 

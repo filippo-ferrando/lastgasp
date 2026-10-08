@@ -67,6 +67,11 @@ groups:
 
       - alert: LastgaspAlertsFailing
         expr: increase(lastgasp_alerts_total{result="failed"}[30m]) > 3
+
+      - alert: LastgaspReplayedPackets
+        expr: increase(lastgasp_packets_invalid_total{reason="replay"}[15m]) > 20
+        annotations:
+          summary: "version 5 packets received more than once, someone may send recorded traffic"
 ```
 
 The server also watches most of these counters itself and opens `server` incidents, see [incidents-and-alerts.md](incidents-and-alerts.md#server-incidents). Prometheus is still the only way to notice a server that is down.
@@ -91,11 +96,13 @@ Also back up the key file, the auth file and the rules file. Enrolled agent keys
 
 ## Upgrades
 
+Read [upgrade-notes.md](upgrade-notes.md) first: it lists what each release needs on upgrade.
+
 | Part | Order and effect |
 | --- | --- |
 | server | upgrade first. The schema is upgraded on start. Agents hold records while it restarts and send them when it answers again |
 | agents | after the server. A server refuses packets of a newer version than its own (`reason="version"`), so a new agent never gets an ack from an old server |
-| wire format | packets have a version. The server accepts versions 2 to 4: version 3 agents work but do not report their version (shown as `old`), version 2 agents also cannot send lost records again. Version 1 agents are refused (`lastgasp_packets_invalid_total{reason="version"}`) and must be upgraded |
+| wire format | packets have a version. The server accepts versions 2 to 5. Version 5 adds forward secrecy, and a version 5 agent waits forever for an older server, so upgrade servers first or start agents with `-forward-secrecy=false`. Once all agents send version 5, `-require-forward-secrecy` refuses the older versions. Before version 5: version 3 agents work but do not report their version (shown as `old`), version 2 agents also cannot send lost records again. Version 1 agents are refused (`lastgasp_packets_invalid_total{reason="version"}`) and must be upgraded |
 
 Agents can be upgraded by running the install script again, without `--token`: it downloads the agent of its release (or `--version vX.Y.Z`), replaces the binary atomically and restarts the service, keeping the key. The Hosts table and `lastgasp_agent_info` show which agents still run an older version.
 
@@ -106,7 +113,7 @@ For an enrolled agent: make a token and run the install command again on the hos
 For key file lines:
 
 1. Create a new key and add a line for the host to the server key file. A host has one key at a time, so do it host by host: replace the line, reload the server, then install the new key on the agent with `install-agent.sh -s ... -k NEWKEY`.
-2. Between the reload and the agent restart, packets of that host fail with `auth_failed`. The agent holds records while no ack comes, so few lines are lost.
+2. Between the reload and the agent restart, packets of that host fail with `auth_failed`. A version 5 session made with the old key keeps working until its next handshake, at most 2 minutes. The agent holds records while no ack comes, so few lines are lost.
 3. For the `*` key, move hosts to their own lines first, then change `*`.
 
 ## Troubleshooting
@@ -121,7 +128,9 @@ For key file lines:
 | Host does not show up at all | No valid packet arrives. Check `lastgasp_packets_invalid_total` by reason, the firewall, and `journalctl -u lastgasp-agent` |
 | `unknown_host` grows | The host name is not in the key file and there is no `*` line. The agent log shows the name it sends |
 | `auth_failed` grows | Wrong key for that host |
-| `version` grows | An old agent, upgrade it |
+| `version` grows | An old agent, upgrade it. With `-require-forward-secrecy`, also agents with `-wait-ack=false` or `-forward-secrecy=false` |
+| `unknown_session` grows | Normal for a few seconds after a server restart: agents still use sessions the server forgot, and start a new handshake after three heartbeats |
+| `replay` grows | Packets or handshake inits seen twice. A few come from network duplicates, many mean someone sends recorded packets again |
 | Agent holds records forever | The server does not answer: no key, wrong key, or replies blocked by a firewall |
 | Many missing packets on one host | Network loss on the path. Lower the agent `-rate` |
 | Missing packets on all hosts at once | The server was down or overloaded. Check `lastgasp_server_queue_dropped_total`, raise `-rcvbuf` and `net.core.rmem_max` |
@@ -132,7 +141,8 @@ For key file lines:
 
 ## Security notes
 
-- Packets are encrypted and authenticated. A captured packet sent again is caught by deduplication.
+- Packets are encrypted and authenticated. A captured version 5 packet sent again is refused by a replay window, older versions are caught by deduplication.
+- Version 5 has forward secrecy: a key stolen later does not open traffic recorded before. See [forward-secrecy.md](forward-secrecy.md).
 - The host name, boot ID and agent instance ID are visible on the network.
 - An agent key lets its holder send logs as any host that uses that key. With `*`, that is every host without its own line.
 - The web UI shows kernel logs, which can hold sensitive details. Use a login and HTTPS.

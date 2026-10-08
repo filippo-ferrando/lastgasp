@@ -58,7 +58,15 @@ jobs:
         run: |
           prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
           image=$(echo "$REGISTRY/$REPOSITORY-server" | tr '[:upper:]' '[:lower:]')
+          # Upgrade notes of this tag, or the unreleased ones, with doc links pointing at the tag.
+          upgrade=$(sh deploy/upgrade-notes.sh "$TAG" docs/upgrade-notes.md "$SERVER_URL/$REPOSITORY/src/tag/$TAG/docs")
           {
+            if [ -n "$upgrade" ]; then
+              echo "## Upgrade notes"
+              echo
+              echo "$upgrade"
+              echo
+            fi
             echo "Install an agent: create a join token in the web UI (Agents, \"add agents\") and run the command it shows, or:"
             echo
             echo '```sh'

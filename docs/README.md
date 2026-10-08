@@ -6,12 +6,14 @@ lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last l
 | --- | --- |
 | [Getting started](getting-started.md) | first server, first agent in one line, check that logs arrive |
 | [How it works](how-it-works.md) | agent and server design, packets, acks, missing packets, deduplication |
+| [Forward secrecy](forward-secrecy.md) | why and how version 5 packets use a Noise handshake, options looked at, upgrade |
 | [Agent](agent.md) | one line install, enrollment, install script, flags, systemd unit, stash, sizing, troubleshooting |
 | [Server](server.md) | keys and enrollment, binary, systemd, Docker, health checks, database, retention, reload, reverse proxy |
 | [Kubernetes](kubernetes.md) | Helm chart: agent DaemonSet, server, keys, Prometheus |
 | [Incidents and alerts](incidents-and-alerts.md) | incident kinds, rules, webhooks, email, testing incidents |
 | [Web UI and API](web-ui-and-api.md) | login and sessions, roles, JSON API with examples, Prometheus metrics |
 | [Operations](operations.md) | production checklist, monitoring, backups, upgrades, troubleshooting, limits |
+| [Upgrade notes](upgrade-notes.md) | actions needed when upgrading to a release |
 | [Releasing](releasing.md) | CI, release files, server image, secrets |
 | [Open work](open-work.md) | ideas not done yet |
 

@@ -24,7 +24,7 @@ The agent assumes the machine can fail in every way while it runs. Its job is to
 | DNS or `/etc/resolv.conf` gone | Addresses are cached. A failed lookup never removes a known address. `-dns ip:port` skips `resolv.conf`, plain IPs skip DNS. |
 | Network down | Records wait in a fixed size ring buffer (`-buffer`). When it is full, the oldest records are dropped: sent ones first, which most likely arrived, then unsent ones, which are counted. |
 | Packets lost on the way | Sent records stay in the buffer until a server confirms them. Records a server reports missing are sent again. See [Acks](#acks). |
-| No server listening yet | The agent holds its records and sends a probe every second until a server answers. See [Acks](#acks). |
+| No server listening yet | The agent holds its records and sends a handshake init (or a probe, for version 4) every second until a server answers. See [Acks](#acks). |
 | Kernel overwrites its buffer | `EPIPE` from `/dev/kmsg` is counted and reading goes on with the oldest record left. |
 | `/dev/kmsg` read error | The device is opened again. Records already read are skipped, so the buffer is not filled with copies. |
 | Out of memory | `oom_score_adj` is -1000 and a Go memory limit is set. |
@@ -43,7 +43,9 @@ The agent has three workers, each restarted on panic:
 
 ## Packets
 
-Each datagram holds one record, one heartbeat or one ack. It stays under 1400 bytes, so it is never fragmented, and is encrypted with AES-256-GCM.
+Each datagram holds one record, one heartbeat, one ack or one handshake message. It stays under 1400 bytes, so it is never fragmented.
+
+Agents send version 5 by default: a Noise handshake with each server gives session keys that change every 2 minutes, so a key stolen later cannot open recorded traffic. The design, the reasons and the packet layout are in [forward-secrecy.md](forward-secrecy.md). Agents with `-wait-ack=false` or `-forward-secrecy=false` send version 4, described here:
 
 | Part | Clear or encrypted | Content |
 | --- | --- | --- |
@@ -53,7 +55,7 @@ Each datagram holds one record, one heartbeat or one ack. It stays under 1400 by
 
 Only the host name, boot ID, instance ID and nonce counter travel in clear text, because the server needs them to pick the key. The key of each agent run is derived from the shared key with HKDF-SHA256 over the boot ID and the instance ID. Every packet uses a new nonce from a counter, so a nonce is never used twice with the same derived key. A changed header makes the packet fail.
 
-Version 2 and 3 packets are still accepted, so agents can be upgraded after the server: version 3 heartbeats have no agent version, version 2 heartbeats also lack the oldest sequence number. Each ack has the version of the heartbeat it answers, so an older agent can read it. Version 1 packets (HMAC only, no encryption) are refused and counted as `version`.
+Version 4 packets are encrypted with AES-256-GCM. Version 2 and 3 packets are still accepted, so agents can be upgraded after the server: version 3 heartbeats have no agent version, version 2 heartbeats also lack the oldest sequence number. Each ack has the version of the heartbeat it answers, so an older agent can read it. Version 1 packets (HMAC only, no encryption) are refused and counted as `version`.
 
 ## Enrollment
 
@@ -87,7 +89,7 @@ UDP gives no delivery receipt. Without help, an agent that starts before the ser
 1. The server answers every valid heartbeat with an ack, sent from the listen port back to the address of the heartbeat. A heartbeat is answered once the batch it came in is stored, so the ack covers every record that arrived before it.
 2. The ack echoes the sequence number and send time of the heartbeat. It is encrypted with a key derived with a different HKDF label, so server and agent nonces never meet.
 3. The agent accepts an ack only for its own agent run and only when it answers one of its 16 newest heartbeats. A replayed old ack is ignored.
-4. Until an ack arrives, the agent holds its records and sends a **probe** every second: a heartbeat with sequence number 0. Probes get an ack but are not counted, so probes that nobody received do not show up as missing.
+4. Until an ack arrives, the agent holds its records and sends a **probe** every second: a heartbeat with sequence number 0. Probes get an ack but are not counted, so probes that nobody received do not show up as missing. With version 5 the handshake init takes the place of the probe, and a finished handshake counts as the first ack.
 5. When no ack arrives for 3 heartbeats (15 seconds by default), the agent holds records again until a server answers.
 6. The server sends at most one ack per agent run every 200 ms, so a replayed heartbeat cannot turn it into a reflector.
 
@@ -107,7 +109,7 @@ So records sent in the 15 seconds before the agent notices a dead server are not
 
 ## The server
 
-1. The UDP listener decodes each datagram, looks up the key of the host and decrypts it. Bad packets are counted by reason (`auth_failed`, `unknown_host`, `bad_host`, `malformed`, `version`) and dropped. Probes and version 2 heartbeats get an ack at once.
+1. The UDP listener decodes each datagram, looks up the key of the host and decrypts it. Bad packets are counted by reason (`auth_failed`, `unknown_host`, `bad_host`, `malformed`, `version`, and for version 5 `unknown_session` and `replay`) and dropped. Probes, handshake inits and version 2 heartbeats get an answer at once.
 2. Valid packets go into a queue of 65536 packets. When the queue is full, packets are dropped and counted (`lastgasp_server_queue_dropped_total`).
 3. A worker takes packets in batches of up to 512, updates the gap tracker, saves new boots and writes the records in one transaction. A failed write is retried 5 times with backoff. Then the heartbeats of the batch get their ack.
 4. The incident detector looks at every stored kernel line, at new boots and at hosts that stopped sending. Its slow queries (the crash check, the last line of a silent host) run without its lock, so the worker never waits for them.

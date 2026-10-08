@@ -19,6 +19,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # For the chart checks in make test.
+      - uses: azure/setup-helm@v4
+
       # The docker compose check in make test skips itself when docker is missing.
       - name: Check formatting
         run: |

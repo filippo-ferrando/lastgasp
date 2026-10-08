@@ -84,6 +84,7 @@ Everything is in [`docs/`](docs/README.md):
 - [How it works](docs/how-it-works.md): design, packets, acks, deduplication
 - [Agent](docs/agent.md): install script, flags, sizing, troubleshooting
 - [Server](docs/server.md): systemd, Docker, PostgreSQL, retention, reverse proxy
+- [Kubernetes](docs/kubernetes.md): Helm chart with the agent on every node
 - [Incidents and alerts](docs/incidents-and-alerts.md): rules, webhooks, email, how to trigger test incidents
 - [Web UI and API](docs/web-ui-and-api.md): login, API examples, metrics
 - [Operations](docs/operations.md): production checklist, Prometheus rules, backups, upgrades
@@ -95,9 +96,9 @@ Ready to use Docker Compose setups (SQLite, PostgreSQL, Telegram, Alertmanager, 
 
 ```sh
 make             # bin/lastgasp-agent and bin/lastgasp-server, needs Go 1.27+
-make test        # all Go tests with the race detector, plus the install script and examples tests
+make test        # all Go tests with the race detector, plus the install script, examples and Helm chart tests
 make dist VERSION=v1.2.0   # the release files in dist/
-make image       # server Docker image
+make image       # server Docker image (make image-agent for the agent)
 ```
 
 The PostgreSQL tests run when you point them at a database:
@@ -118,7 +119,7 @@ internal/server        ingest, enrollment, gap tracking, retention, login sessio
 internal/incident      incident rules and detection, webhook and email alerts
 internal/store         SQLite and PostgreSQL storage and schema upgrades
 internal/version       build version
-deploy/                systemd units and the agent install script
+deploy/                systemd units, the agent install script and the Helm chart
 .forgejo/              CI and release workflows
 examples/              Docker Compose setups of the server
 docs/                  documentation

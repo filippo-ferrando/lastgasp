@@ -1,0 +1,179 @@
+# Default values for the lastgasp chart.
+
+nameOverride: ""
+fullnameOverride: ""
+imagePullSecrets: []
+# Used to build the in-cluster server address the agents send to.
+clusterDomain: cluster.local
+
+# Shared agent key. Every agent uses it, and the server accepts it for every host (a "*" line).
+key:
+  # Secret with "agent.key" (64 hex characters) and "keys" (the server key file, with a "* <key>" line).
+  # Empty: the chart creates one with a random key and keeps it on upgrades.
+  existingSecret: ""
+  # Extra "host hexkey" lines for the generated server key file, for agents outside the cluster.
+  extraLines: ""
+
+server:
+  enabled: true
+  # 0 or 1. The server keeps per-host state in memory, so more replicas would split it.
+  replicas: 1
+  image:
+    repository: git.fferrando.cc/rdfilippo/lastgasp-server
+    # Default: the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Delete data older than this, "0" keeps everything. See docs/server.md for the other limits.
+  retain: 720h
+  # UI address used for links in alerts.
+  publicURL: ""
+  # host:port shown in the agent install commands of the UI, for machines outside the cluster.
+  agentAddress: ""
+
+  database:
+    # postgres:// URL. Empty: SQLite on the persistent volume below.
+    url: ""
+    # Secret holding the PostgreSQL password, passed as PGPASSWORD.
+    passwordSecret:
+      name: ""
+      key: password
+
+  persistence:
+    # Used for SQLite only.
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    size: 5Gi
+
+  # Secret with an "auth" key holding the auth file (users and API tokens). Empty: no login.
+  auth:
+    existingSecret: ""
+
+  # Extra incident rules (the -rules file), see docs/incidents-and-alerts.md.
+  rules: ""
+
+  # More server flags, like alert targets: ["-alert-webhook=https://...", "-alert-format=slack"]
+  extraArgs: []
+  env: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  service:
+    # Web UI, API and /metrics.
+    http:
+      type: ClusterIP
+      port: 8080
+      annotations: {}
+    # Agent packets. Use NodePort or LoadBalancer to accept agents from outside the cluster.
+    udp:
+      type: ClusterIP
+      port: 5140
+      nodePort: null
+      loadBalancerIP: ""
+      externalTrafficPolicy: ""
+      annotations: {}
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: lastgasp.example.net
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  # Time to store queued packets on stop.
+  terminationGracePeriodSeconds: 30
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+agent:
+  enabled: true
+  image:
+    repository: git.fferrando.cc/rdfilippo/lastgasp-agent
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Comma separated host:port list. Empty: the UDP service of this release.
+  server: ""
+  # Send from the node network. Keeps working when the pod network breaks, needs a server address reachable from the node.
+  hostNetwork: false
+  # Read crash logs saved by the kernel. Turn off on nodes without pstore.
+  pstore: true
+  # Keep unconfirmed records in /run/lastgasp on the node (tmpfs), so an agent restart loses nothing.
+  stash: true
+  # More agent flags, like ["-buffer=32768", "-rate=1000"].
+  extraArgs: []
+  env: []
+
+  # Opening /dev/kmsg needs a privileged container: the device is not allowed otherwise.
+  securityContext:
+    privileged: true
+    readOnlyRootFilesystem: true
+  # Gives the agent the lowest OOM score, so it is never killed first.
+  priorityClassName: system-node-critical
+  resources:
+    requests:
+      cpu: 10m
+      memory: 96Mi
+    limits:
+      memory: 128Mi
+  # Run on every node, control plane and tainted nodes included.
+  tolerations:
+    - operator: Exists
+  nodeSelector: {}
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+# Prometheus scraping of the server /metrics.
+metrics:
+  enabled: false
+  # Scrape annotations (prometheus.io/scrape) on the HTTP service.
+  annotations: false
+  # ServiceMonitor, needs the Prometheus Operator CRDs.
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  # Alert rules from docs/operations.md as a PrometheusRule, needs the Prometheus Operator CRDs.
+  prometheusRule:
+    enabled: false
+    labels: {}
+  # Require a login for /metrics (-auth-metrics). Needs server.auth and a viewer API token.
+  requireAuth: false
+  # Secret with the API token used by the ServiceMonitor when requireAuth is set.
+  tokenSecret:
+    name: ""
+    key: token

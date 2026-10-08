@@ -1,0 +1,7 @@
+{{- /* Checks for value combinations that cannot work. Renders nothing. */}}
+{{- if and .Values.metrics.enabled .Values.metrics.requireAuth (not .Values.server.auth.existingSecret) }}
+{{- fail "metrics.requireAuth needs server.auth.existingSecret: without users there is no token to scrape with" }}
+{{- end }}
+{{- if and .Values.server.database.passwordSecret.name (not .Values.server.database.url) }}
+{{- fail "server.database.passwordSecret is set but server.database.url is empty" }}
+{{- end }}

@@ -1,0 +1,60 @@
+{{- if .Values.server.enabled }}
+{{- $svc := .Values.server.service }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-http
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  {{- if or $svc.http.annotations (and .Values.metrics.enabled .Values.metrics.annotations) }}
+  annotations:
+    {{- if and .Values.metrics.enabled .Values.metrics.annotations }}
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ $svc.http.port | quote }}
+    prometheus.io/path: /metrics
+    {{- end }}
+    {{- with $svc.http.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ $svc.http.type }}
+  selector:
+    {{- include "lastgasp.selectorLabels" (dict "ctx" . "component" "server") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $svc.http.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-udp
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  {{- with $svc.udp.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svc.udp.type }}
+  {{- with $svc.udp.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  {{- with $svc.udp.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  selector:
+    {{- include "lastgasp.selectorLabels" (dict "ctx" . "component" "server") | nindent 4 }}
+  ports:
+    - name: agents
+      port: {{ $svc.udp.port }}
+      targetPort: agents
+      protocol: UDP
+      {{- if and $svc.udp.nodePort (ne $svc.udp.type "ClusterIP") }}
+      nodePort: {{ $svc.udp.nodePort }}
+      {{- end }}
+{{- end }}

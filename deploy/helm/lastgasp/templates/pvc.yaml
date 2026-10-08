@@ -1,0 +1,20 @@
+{{- if and .Values.server.enabled .Values.server.persistence.enabled (not .Values.server.database.url) (not .Values.server.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-data
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+  annotations:
+    # Uninstalling the chart keeps the database.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.server.persistence.accessModes | nindent 4 }}
+  {{- with .Values.server.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.server.persistence.size }}
+{{- end }}

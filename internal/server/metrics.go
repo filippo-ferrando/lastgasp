@@ -16,6 +16,8 @@ type Metrics struct {
 	Deduplicated *prometheus.CounterVec
 	QueueDropped prometheus.Counter
 	Probes       prometheus.Counter
+	Handshakes   prometheus.Counter
+	Sessions     prometheus.Gauge
 	StoreErrors  prometheus.Counter
 	LostToStore  prometheus.Counter
 	KeyReloads   *prometheus.CounterVec
@@ -42,6 +44,12 @@ func NewMetrics(reg prometheus.Registerer, tr *Tracker, staleAfter time.Duration
 		}),
 		Probes: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lastgasp_probes_total", Help: "Probes from agents waiting for a server to answer.",
+		}),
+		Handshakes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lastgasp_handshakes_total", Help: "Version 5 handshakes answered, each one starts a new session.",
+		}),
+		Sessions: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "lastgasp_sessions", Help: "Agent runs with a version 5 session in server memory.",
 		}),
 		StoreErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lastgasp_store_errors_total", Help: "Database errors.",
@@ -70,7 +78,7 @@ func NewMetrics(reg prometheus.Registerer, tr *Tracker, staleAfter time.Duration
 	}, []string{"version", "goversion"})
 	build.WithLabelValues(version.String(), runtime.Version()).Set(1)
 	reg.MustRegister(build)
-	reg.MustRegister(m.Invalid, m.Stored, m.Deduplicated, m.QueueDropped, m.Probes, m.StoreErrors, m.LostToStore, m.KeyReloads, m.AuthFailures, m.AuthBlocked, m.RetentionDeleted, m.Enrollments,
+	reg.MustRegister(m.Invalid, m.Stored, m.Deduplicated, m.QueueDropped, m.Probes, m.Handshakes, m.Sessions, m.StoreErrors, m.LostToStore, m.KeyReloads, m.AuthFailures, m.AuthBlocked, m.RetentionDeleted, m.Enrollments,
 		&trackerCollector{tr: tr, staleAfter: staleAfter})
 	return m
 }
@@ -103,13 +111,14 @@ var (
 	descOverruns   = desc("lastgasp_agent_kmsg_overruns_total", "Times the kernel overwrote records before the agent read them.")
 	descSendErrors = desc("lastgasp_agent_send_errors_total", "Failed sends reported by the agent.")
 	descBuffered   = desc("lastgasp_agent_buffered_records", "Records waiting in the agent buffer.")
+	descWire       = desc("lastgasp_agent_wire_version", "Packet version of the newest agent run. 5 has forward secrecy.")
 	descAgentInfo  = prometheus.NewDesc("lastgasp_agent_info", "Always 1, with the version of the newest agent run as a label.",
 		[]string{"host", "version"}, nil)
 )
 
 func (c *trackerCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descReceived, descGaps, descRecovered, descMissing, descDuplicates,
-		descLastSeen, descUp, descDrops, descOverruns, descSendErrors, descBuffered, descAgentInfo} {
+		descLastSeen, descUp, descDrops, descOverruns, descSendErrors, descBuffered, descWire, descAgentInfo} {
 		ch <- d
 	}
 }
@@ -140,6 +149,11 @@ func (c *trackerCollector) Collect(ch chan<- prometheus.Metric) {
 		} {
 			// Never panic in a scrape: a bad label value only skips that metric.
 			if pm, err := prometheus.NewConstMetric(m.d, m.t, m.v, h.Host); err == nil {
+				ch <- pm
+			}
+		}
+		if h.Wire != 0 {
+			if pm, err := prometheus.NewConstMetric(descWire, gauge, float64(h.Wire), h.Host); err == nil {
 				ch <- pm
 			}
 		}

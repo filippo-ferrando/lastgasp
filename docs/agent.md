@@ -118,6 +118,7 @@ LASTGASP_KEY=4f1c...e9 lastgasp-agent -server 10.0.0.5:5140,10.0.0.6:5140 -hostn
 | `-rate` | 2000 | max packets per second, 0 for no limit |
 | `-heartbeat` | 5s | heartbeat interval, 0 or at least 100ms |
 | `-wait-ack` | true | hold records until a server answers a heartbeat. Needs `-heartbeat` above 0 |
+| `-forward-secrecy` | true | send version 5 packets with a handshake per server, so a stolen key cannot open old traffic, see [forward-secrecy.md](forward-secrecy.md). Needs `-wait-ack`. Set to false only for servers that do not know version 5 yet |
 | `-resolve-every` | 1m | DNS refresh interval, at least 1s |
 | `-pstore` | /sys/fs/pstore | pstore folder, empty to disable |
 | `-kmsg` | /dev/kmsg | kernel log device |
@@ -186,6 +187,7 @@ journalctl -u lastgasp-agent -f
 
 | Problem | Check |
 | --- | --- |
+| Agent says "waiting for a server to answer a handshake" forever | As below, or the server is too old for version 5 packets: upgrade the server, or set `-forward-secrecy=false` until then |
 | Agent says "waiting for a server to answer" forever | The server is not reachable on UDP, the host has no key in the server key file (server metric `lastgasp_packets_invalid_total{reason="unknown_host"}`), the key is wrong (`reason="auth_failed"`), or replies are blocked by a firewall. As a last resort `-wait-ack=false` sends without acks |
 | Host shows up but no logs | Look at the agent log for kmsg errors. Write a test line: `echo test > /dev/kmsg` |
 | Many missing packets | Network loss, or the server queue is full (`lastgasp_server_queue_dropped_total`). Lower `-rate`, raise the server `-rcvbuf` |

@@ -33,6 +33,7 @@ func main() {
 		rate      = flag.Int("rate", 2000, "max packets per second, 0 for no limit")
 		heartbeat = flag.Duration("heartbeat", 5*time.Second, "interval between heartbeats")
 		waitAck   = flag.Bool("wait-ack", true, "hold records until a server answers a heartbeat (needs -heartbeat > 0)")
+		fsec      = flag.Bool("forward-secrecy", true, "use version 5 packets with a handshake per server, so a stolen key cannot open old traffic (needs -wait-ack)")
 		resolve   = flag.Duration("resolve-every", time.Minute, "interval between DNS refreshes")
 		mlock     = flag.Bool("mlock", true, "lock all memory so the agent never reads from disk again")
 		memLimit  = flag.Int64("memory-limit", 64<<20, "soft Go memory limit in bytes")
@@ -50,7 +51,7 @@ func main() {
 	// Everything is read at start, while the disk still works.
 	cfg := agent.Config{
 		DNSServer: *dns, KmsgPath: *kmsg, PstoreDir: *pstore, BootIDPath: *bootID,
-		BufferSize: *buffer, Rate: *rate, Heartbeat: *heartbeat, WaitAck: *waitAck, ResolveEvery: *resolve, MaxPstoreFile: 1 << 20,
+		BufferSize: *buffer, Rate: *rate, Heartbeat: *heartbeat, WaitAck: *waitAck, ForwardSecrecy: *fsec, ResolveEvery: *resolve, MaxPstoreFile: 1 << 20,
 		StashPath: *stash, StashSize: *stashSize,
 	}
 	for _, s := range strings.Split(*servers, ",") {

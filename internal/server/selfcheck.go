@@ -11,12 +11,14 @@ import (
 	"lastgasp/internal/store"
 )
 
-// Check is one server counter that should not grow.
+// Check is one server counter that should not grow. Min is the growth in one run that opens an
+// incident, 0 means any growth.
 type Check struct {
 	Rule     string
 	Severity store.Severity
 	Summary  string
 	Value    func() float64
+	Min      int
 }
 
 // SelfCheck opens server incidents when a checked counter grows, so problems of the server
@@ -29,23 +31,30 @@ type SelfCheck struct {
 	last map[string]float64
 }
 
-// ServerChecks watches database errors, lost records, dropped packets, failed alerts and packets with a bad key.
+// ServerChecks watches database errors, lost records, dropped packets, failed alerts, packets with a bad key
+// and replayed packets.
 func ServerChecks(m *Metrics, im *incident.Metrics) []Check {
 	return []Check{
 		{"records_lost", store.SeverityCritical, "Records lost because the database kept failing. Check the database and the server log.",
-			func() float64 { return sum(m.LostToStore, nil) }},
+			func() float64 { return sum(m.LostToStore, nil) }, 0},
 		{"database", store.SeverityWarning, "Database errors. Check the database and the server log.",
-			func() float64 { return sum(m.StoreErrors, nil) }},
+			func() float64 { return sum(m.StoreErrors, nil) }, 0},
 		{"queue", store.SeverityWarning, "Packets dropped because the server could not keep up. Raise -rcvbuf or check the database speed.",
-			func() float64 { return sum(m.QueueDropped, nil) }},
+			func() float64 { return sum(m.QueueDropped, nil) }, 0},
 		{"alerts", store.SeverityWarning, "Alerts could not be sent. Check the alert targets and the server log.",
-			func() float64 { return sum(im.Alerts, map[string]string{"result": "failed"}) }},
+			func() float64 { return sum(im.Alerts, map[string]string{"result": "failed"}) }, 0},
 		{"keys", store.SeverityWarning, "Packets with an unknown host or a wrong key. Check the key file and the agent keys.",
 			func() float64 {
 				return sum(m.Invalid, map[string]string{"reason": "unknown_host"}) + sum(m.Invalid, map[string]string{"reason": "auth_failed"})
-			}},
+			}, 0},
+		// A network can deliver a packet twice now and then, many in a short time mean someone sends recorded traffic.
+		{"replay", store.SeverityWarning, "Version 5 packets or handshakes received more than once. Many of them mean someone sends recorded traffic again.",
+			func() float64 { return sum(m.Invalid, map[string]string{"reason": "replay"}) }, replayMin},
 	}
 }
+
+// replayMin is the number of replays within one self check run that opens an incident.
+const replayMin = 20
 
 // sum adds the values of every metric of c whose labels include want.
 func sum(c prometheus.Collector, want map[string]string) float64 {
@@ -94,7 +103,7 @@ func (s *SelfCheck) RunOnce(ctx context.Context, now time.Time) {
 		v := c.Value()
 		n := int(v - s.last[c.Rule])
 		s.last[c.Rule] = v
-		if n > 0 {
+		if n > 0 && n >= c.Min {
 			s.Detector.ServerProblem(ctx, c.Rule, c.Severity, n, c.Summary, now)
 		}
 	}

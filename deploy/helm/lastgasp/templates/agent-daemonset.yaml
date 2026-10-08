@@ -57,6 +57,9 @@ spec:
             {{- else }}
             - -stash=
             {{- end }}
+            {{- if not $a.forwardSecrecy }}
+            - -forward-secrecy=false
+            {{- end }}
             {{- with $a.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

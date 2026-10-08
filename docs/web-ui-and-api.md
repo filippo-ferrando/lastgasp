@@ -11,7 +11,7 @@ The header shows the user, the server version and a "log out" button. The page r
 | Incidents | the newest 50 incidents with severity, host, kind, count, alert state and summary. A click opens the incident with its kernel lines and pstore lines, the matching line marked. "open only" hides closed ones |
 | Silences | active and upcoming silences with their host pattern, kind, window, comment and author. Admins add a silence with the form above the table and end one with "end now" |
 | Agents | for admins: "add agents" makes a join token and shows the one line install command. Below, the usable tokens (revoke) and the enrolled hosts with the time and address they enrolled from (revoke key) |
-| Hosts | up or down, last packet, boots seen, packets received, missing, late, duplicates, agent drops, kernel overruns, send errors, records waiting in the agent, and the agent version (marked when it differs from the server version, `old` for agents from before wire version 4). A click filters everything by that host, a second click removes the filter |
+| Hosts | up or down, last packet, boots seen, packets received, missing, late, duplicates, agent drops, kernel overruns, send errors, records waiting in the agent, the agent version (marked when it differs from the server version, `old` for agents from before wire version 4), and the wire version of its packets (marked below 5, which has no forward secrecy). A click filters everything by that host, a second click removes the filter |
 | Missing packets | agent runs with missing packets and the missing sequence ranges |
 | Logs | live kernel lines, filtered by host, level, source and text. A click on the host of a line filters by that host. "live" off stops new lines. "older" loads 300 more and says when there are none. "download" saves all matching lines as NDJSON. When new lines arrive while the view is scrolled up, a button jumps to them |
 
@@ -175,8 +175,10 @@ A download cut by a database error ends with a line `{"error": "download incompl
 | `lastgasp_packets_gap_total` | host | packets found missing, ever |
 | `lastgasp_packets_late_total` | host | missing packets that arrived later |
 | `lastgasp_packets_duplicate_total` | host | packets received more than once |
-| `lastgasp_packets_invalid_total` | reason | refused packets: `auth_failed`, `unknown_host`, `bad_host`, `malformed`, `version` |
-| `lastgasp_probes_total` | | probes from agents waiting for an answer |
+| `lastgasp_packets_invalid_total` | reason | refused packets: `auth_failed`, `unknown_host`, `bad_host`, `malformed`, `version`, `unknown_session`, `replay` |
+| `lastgasp_probes_total` | | probes from version 4 agents waiting for an answer |
+| `lastgasp_handshakes_total` | | version 5 handshakes answered, each one starts a session |
+| `lastgasp_sessions` | | agent runs with a version 5 session in server memory |
 | `lastgasp_agent_up` | host | 1 when the host sent within `-stale-after` |
 | `lastgasp_agent_last_seen_timestamp_seconds` | host | time of the last packet |
 | `lastgasp_agent_buffer_dropped_total` | host | records the agent dropped |
@@ -198,6 +200,7 @@ A download cut by a database error ends with a line `{"error": "download incompl
 | `lastgasp_enrollments_total` | result | enrollment requests: `enrolled`, `bad_token`, `host_taken`, `limited`, `malformed`, `dropped` |
 | `lastgasp_build_info` | version, goversion | always 1 |
 | `lastgasp_agent_info` | host, version | always 1, the version of the newest agent run |
+| `lastgasp_agent_wire_version` | host | packet version of the newest agent run. 5 has forward secrecy |
 
 The Go runtime and process metrics are included too. Per host series of hosts removed by retention disappear.
 

@@ -46,4 +46,8 @@ spec:
             summary: "packets with a missing or wrong key, check the key file"
         - alert: LastgaspAlertsFailing
           expr: increase(lastgasp_alerts_total{result="failed"}[30m]) > 3
+        - alert: LastgaspReplayedPackets
+          expr: increase(lastgasp_packets_invalid_total{reason="replay"}[15m]) > 20
+          annotations:
+            summary: "version 5 packets received more than once, someone may send recorded traffic"
 {{- end }}

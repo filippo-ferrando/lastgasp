@@ -20,6 +20,7 @@ test: test-deploy test-examples test-chart
 
 test-deploy:
 	sh deploy/install-agent_test.sh
+	sh deploy/upgrade-notes_test.sh
 
 test-examples:
 	sh examples/examples_test.sh

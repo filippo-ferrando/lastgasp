@@ -34,6 +34,7 @@ for s in "kind: DaemonSet" "kind: Deployment" "kind: PersistentVolumeClaim" "nam
 	has "$d" "$s"
 done
 hasnot "$d" "kind: ServiceMonitor"
+hasnot "$d" "forward-secrecy"
 hasnot "$d" "prometheus.io/scrape"
 key=$(sed -n 's/^  agent\.key: //p' "$d" | base64 -d)
 echo "$key" | grep -Eq '^[0-9a-f]{64}$' || fail "generated key is not 64 hex characters: $key"
@@ -48,6 +49,7 @@ render rules --set metrics.enabled=true --set metrics.prometheusRule.enabled=tru
 has "$TMP/rules" "kind: PrometheusRule"
 has "$TMP/rules" 'summary: "{{ $labels.host }} sent nothing for 5 minutes"'
 has "$TMP/rules" 'up{job="lastgasp"}'
+has "$TMP/rules" 'reason="replay"'
 has "$TMP/rules" 'prometheus.io/scrape: "true"'
 hasnot "$TMP/rules" "kind: ServiceMonitor"
 
@@ -79,7 +81,7 @@ CGO_ENABLED=0 go build -o "$TMP/agent" ./cmd/lastgasp-agent
 "$TMP/agent" -h 2>"$TMP/agent.help" || true
 all="--set server.publicURL=https://lg.example --set server.agentAddress=10.0.0.5:5140 --set server.auth.existingSecret=auth
 	--set server.rules=x --set metrics.enabled=true --set metrics.requireAuth=true --set metrics.tokenSecret.name=tok
-	--set agent.pstore=false --set agent.stash=false"
+	--set agent.pstore=false --set agent.stash=false --set agent.forwardSecrecy=false --set server.requireForwardSecrecy=true"
 for part in server agent; do
 	# shellcheck disable=SC2086
 	render "$part.yaml" --show-only "templates/$part-$([ $part = server ] && echo deployment || echo daemonset).yaml" $all
@@ -89,6 +91,8 @@ for part in server agent; do
 done
 has "$TMP/server.yaml" "- -auth-metrics"
 has "$TMP/server.yaml" "- -rules=/etc/lastgasp/rules/rules"
+has "$TMP/server.yaml" "- -require-forward-secrecy"
+has "$TMP/agent.yaml" "- -forward-secrecy=false"
 has "$TMP/agent.yaml" "- -pstore="
 hasnot "$TMP/agent.yaml" "path: /sys/fs/pstore"
 

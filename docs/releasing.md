@@ -9,6 +9,9 @@ CI runs on the Forgejo instance with Forgejo Actions. The workflows are in `.for
 
 ## Cut a release
 
+1. When the release needs an action on upgrade, write it in [upgrade-notes.md](upgrade-notes.md) under `## Unreleased`, and rename that heading to the tag. The release notes start with that section.
+2. Tag and push:
+
 ```sh
 git tag -a v1.2.0 -m "v1.2.0"
 git push origin v1.2.0
@@ -21,7 +24,7 @@ A tag with a dash, like `v1.2.0-rc1`, makes a prerelease and does not move the `
 | Job | Does |
 | --- | --- |
 | `test` | `go vet` and `make test` |
-| `build` | `make dist VERSION=v1.2.0`, writes the release notes (install line, image name, changes since the previous tag), keeps both as an artifact |
+| `build` | `make dist VERSION=v1.2.0`, writes the release notes (upgrade notes of the tag, install line, image name, changes since the previous tag), keeps both as an artifact |
 | `image` | installs the Docker CLI, sets up buildx, logs in to the registry, builds and pushes the server and agent images |
 | `chart` | packages `deploy/helm/lastgasp` with the version of the tag and pushes it to the registry as an OCI chart |
 | `release` | publishes the Forgejo release of the tag with `softprops/action-gh-release`, once `build`, `image` and `chart` worked |

@@ -136,6 +136,7 @@ More compose setups (Telegram, Alertmanager, HTTPS with Caddy, a full production
 | `-key-file` | | `host hexkey` lines. Optional: without it only enrolled agents are accepted |
 | `-agent-address` | `-public-url` host, `-listen` port | `host:port` agents send to, shown in install commands |
 | `-repo-url` | https://git.fferrando.cc/rdfilippo/lastgasp | repository whose releases hold the agent and installer |
+| `-require-forward-secrecy` | false | refuse packets before version 5 (counted as `version`), once every agent sends version 5. Agents with `-wait-ack=false` stop working |
 | `-rcvbuf` | 8 MiB | UDP receive buffer. Linux caps it at `net.core.rmem_max` |
 | `-stale-after` | 30s | time without packets before a host is shown as down |
 | `-retain` | 0 | delete records, closed incidents, old boots, agent runs and silences older than this, at least 1h. 0 keeps everything |

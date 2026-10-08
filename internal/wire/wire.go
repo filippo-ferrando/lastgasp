@@ -133,8 +133,9 @@ type Stats struct {
 }
 
 // MaxMsg returns the largest message that fits in one record packet for the given host.
+// It uses the version 5 header, the larger one, so a record fits every version.
 func MaxMsg(hostLen int) int {
-	return MaxPacket - TagSize - headerFixed - hostLen - innerFixed - recordFixed
+	return MaxPacket - TagSize - headerFS - hostLen - innerFixed - recordFixed
 }
 
 // runAEAD derives the AES-256-GCM cipher of one agent run, so each run has its own key.
@@ -248,6 +249,12 @@ func EncodeAck(p *Packet, upto uint64, missing []Range, key []byte) ([]byte, err
 	ctr := binary.BigEndian.Uint64(r[:])
 	// The ack has the version of the heartbeat, so an older agent can read it.
 	ver := min(max(p.Version, minVersion), version)
+	b := encodeAck(p, ver, upto, missing)
+	h := header(ver, p.Host, p.BootID, p.Instance, ctr)
+	return a.Seal(h, nonce(ctr), b, h), nil
+}
+
+func encodeAck(p *Packet, ver uint8, upto uint64, missing []Range) []byte {
 	b := make([]byte, 0, MaxPacket)
 	b = append(b, byte(KindAck))
 	b = binary.BigEndian.AppendUint64(b, p.Seq)
@@ -260,8 +267,7 @@ func EncodeAck(p *Packet, upto uint64, missing []Range, key []byte) ([]byte, err
 			b = binary.BigEndian.AppendUint64(b, m.To)
 		}
 	}
-	h := header(ver, p.Host, p.BootID, p.Instance, ctr)
-	return a.Seal(h, nonce(ctr), b, h), nil
+	return b
 }
 
 // DecodeAck checks an ack sent to the agent run (host, bootID, instance). The returned ack holds the seq and
@@ -283,10 +289,15 @@ func DecodeAck(buf, key []byte, host string, bootID [16]byte, instance uint64) (
 	if err != nil {
 		return ack, ErrAuth
 	}
+	return decodeAck(inner, h.version)
+}
+
+func decodeAck(inner []byte, ver uint8) (Ack, error) {
+	var ack Ack
 	r := reader{b: inner}
 	kind := Kind(r.u8())
 	ack.Seq, ack.SentAt = r.u64(), int64(r.u64())
-	if h.version >= 3 {
+	if ver >= 3 {
 		ack.Upto = r.u64()
 		n := int(r.u8())
 		if n > MaxAckRanges {
@@ -413,7 +424,14 @@ func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
 	if err != nil {
 		return nil, ErrAuth
 	}
+	if err := decodeInner(p, inner); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
 
+// decodeInner parses the encrypted part of a packet into p. p.Version must be set.
+func decodeInner(p *Packet, inner []byte) error {
 	r := reader{b: inner}
 	p.Kind = Kind(r.u8())
 	p.Seq = r.u64()
@@ -440,17 +458,17 @@ func Decode(buf []byte, keyFor func(host string) []byte) (*Packet, error) {
 		if p.Version >= 4 {
 			n := int(r.u8())
 			if n > MaxAgentVersion {
-				return nil, ErrMalformed
+				return ErrMalformed
 			}
 			p.AgentVersion = strings.ToValidUTF8(string(r.take(n)), "?")
 		}
 	default:
-		return nil, ErrKind
+		return ErrKind
 	}
 	if r.bad || len(r.b) != 0 {
-		return nil, ErrMalformed
+		return ErrMalformed
 	}
-	return p, nil
+	return nil
 }
 
 type reader struct {

@@ -27,6 +27,7 @@ The server checks its own counters every 10 seconds. When one grows, it opens a 
 | `queue` | warning | packets dropped because the server queue was full |
 | `alerts` | warning | alert sends that failed |
 | `keys` | warning | packets with an unknown host or a wrong key |
+| `replay` | warning | 20 or more version 5 packets or handshakes seen twice within one check. A few come from the network, many mean someone sends recorded traffic again |
 
 Agent hosts should not be named `@server`. The Prometheus rules in [operations.md](operations.md#monitoring) cover the same problems and also notice a server that is down, which a server cannot report about itself.
 

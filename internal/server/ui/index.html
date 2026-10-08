@@ -321,7 +321,8 @@ async function loadHosts() {
     <th class="num">Duplicates</th><th class="num" title="Dropped by the agent because its buffer was full">Agent drops</th>
     <th class="num" title="Kernel overwrote records before the agent read them">Kernel overruns</th>
     <th class="num">Send errors</th><th class="num" title="Records the agent holds until a server confirms them">Buffered</th>
-    <th title="Version of the newest agent run">Agent</th></tr>` +
+    <th title="Version of the newest agent run">Agent</th>
+    <th class="num" title="Packet version of the newest agent run. Version 5 has forward secrecy">Wire</th></tr>` +
     hosts.map(h => `<tr class="click${cur === h.host ? " sel" : ""}" tabindex="0" data-key="${esc(h.host)}"
       title="${cur === h.host ? "Show all hosts" : "Show only " + esc(h.host)}" aria-pressed="${cur === h.host}">
       <td><span class="dot ${h.up ? "up" : "down"}" title="${h.up ? "up" : "down"}"></span>${esc(h.host)}</td>
@@ -336,7 +337,9 @@ async function loadHosts() {
       <td${cls(h.agent.SendErrors, "warn")}>${fmtNum(h.agent.SendErrors)}</td>
       <td class="num">${fmtNum(h.agent.Buffered)}</td>
       <td class="muted${h.agent_version && h.agent_version !== serverVersion ? " warn" : ""}"
-        title="${h.agent_version && h.agent_version !== serverVersion ? "Not the server version " + esc(serverVersion) : ""}">${esc(h.agent_version || "old")}</td></tr>`).join("") + "</table>");
+        title="${h.agent_version && h.agent_version !== serverVersion ? "Not the server version " + esc(serverVersion) : ""}">${esc(h.agent_version || "old")}</td>
+      <td class="num${h.wire_version && h.wire_version < 5 ? " warn" : ""}"
+        title="${h.wire_version && h.wire_version < 5 ? "No forward secrecy: an old agent, or -wait-ack=false or -forward-secrecy=false" : ""}">${h.wire_version || "?"}</td></tr>`).join("") + "</table>");
 }
 
 // Missing packets

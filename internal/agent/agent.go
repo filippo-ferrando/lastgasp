@@ -18,19 +18,21 @@ import (
 
 // Config holds everything the agent needs. It is fully read before Run starts.
 type Config struct {
-	Servers       []string
-	DNSServer     string
-	Key           []byte
-	Host          string
-	BootIDPath    string
-	KmsgPath      string
-	PstoreDir     string
-	BufferSize    int
-	Rate          int
-	Heartbeat     time.Duration
-	WaitAck       bool
-	ResolveEvery  time.Duration
-	MaxPstoreFile int64
+	Servers    []string
+	DNSServer  string
+	Key        []byte
+	Host       string
+	BootIDPath string
+	KmsgPath   string
+	PstoreDir  string
+	BufferSize int
+	Rate       int
+	Heartbeat  time.Duration
+	WaitAck    bool
+	// ForwardSecrecy uses version 5 packets with a handshake per server. It needs WaitAck.
+	ForwardSecrecy bool
+	ResolveEvery   time.Duration
+	MaxPstoreFile  int64
 	// StashPath is a file on tmpfs that keeps unconfirmed records across agent restarts, empty to disable.
 	StashPath string
 	StashSize int
@@ -153,7 +155,10 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	sender := &Sender{
 		Host: cfg.Host, BootID: bootID, Instance: randomUint64(),
 		Key: cfg.Key, Queue: queue, First: first, Resolver: res, Stats: stats, Log: log,
-		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck, Version: version.String(),
+		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck, ForwardSecrecy: cfg.ForwardSecrecy, Version: version.String(),
+	}
+	if cfg.ForwardSecrecy && !sender.fs() {
+		log.Printf("agent: forward secrecy needs -wait-ack and -heartbeat, sending version 4 packets without it")
 	}
 	kmsg := &KmsgReader{Path: cfg.KmsgPath, Stats: stats, Log: log,
 		OnEntry: func(e Entry) {

@@ -54,6 +54,9 @@ server:
   # Extra incident rules (the -rules file), see docs/incidents-and-alerts.md.
   rules: ""
 
+  # Refuse packets before version 5, which have no forward secrecy. Turn on once every agent sends version 5.
+  requireForwardSecrecy: false
+
   # More server flags, like alert targets: ["-alert-webhook=https://...", "-alert-format=slack"]
   extraArgs: []
   env: []
@@ -128,6 +131,9 @@ agent:
   pstore: true
   # Keep unconfirmed records in /run/lastgasp on the node (tmpfs), so an agent restart loses nothing.
   stash: true
+  # Send version 5 packets with a handshake per server, see docs/forward-secrecy.md. Turn off only
+  # while the server is older than version 5.
+  forwardSecrecy: true
   # More agent flags, like ["-buffer=32768", "-rate=1000"].
   extraArgs: []
   env: []

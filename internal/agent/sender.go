@@ -32,7 +32,9 @@ type Sender struct {
 	Heartbeat time.Duration // interval between heartbeats
 	// WaitAck holds records until a server answers a heartbeat, so nothing is sent while no server listens.
 	WaitAck bool
-	Version string // agent version sent in heartbeats
+	// ForwardSecrecy uses version 5 sessions with a Noise handshake per server. It needs WaitAck.
+	ForwardSecrecy bool
+	Version        string // agent version sent in heartbeats
 
 	newConn func() (packetConn, error)
 	conn    packetConn
@@ -48,6 +50,11 @@ type Sender struct {
 	beatMu sync.Mutex
 	beats  [16]beatSent // the newest heartbeats, an ack must answer one of them
 	nbeat  int
+
+	clock  func() time.Time // for tests, nil is time.Now
+	peerMu sync.Mutex
+	peers  map[string]*peer // version 5 state per server address
+	hsNum  uint64           // handshakes started, grows for every one
 }
 
 type beatSent struct {
@@ -74,6 +81,7 @@ func (s *Sender) init() error {
 		return err
 	}
 	s.sealer = sealer
+	s.peers = map[string]*peer{}
 	if s.newConn == nil {
 		s.newConn = func() (packetConn, error) { return net.ListenUDP("udp", nil) }
 	}
@@ -92,6 +100,9 @@ func (s *Sender) ready() bool {
 	if !s.WaitAck || s.Heartbeat <= 0 {
 		return true
 	}
+	if s.fs() {
+		return s.readyFS()
+	}
 	last := s.lastAck.Load()
 	return last != 0 && time.Since(s.start)-time.Duration(last) < ackWindow*s.Heartbeat
 }
@@ -104,6 +115,10 @@ func (s *Sender) logState(ready bool) {
 	case ready && s.state != "sending":
 		s.Log.Printf("send: a server answered, sending %d buffered records", s.buffered())
 		s.state = "sending"
+	case !ready && s.state == "" && s.fs():
+		s.Log.Printf("send: waiting for a server to answer a handshake before sending records " +
+			"(servers that do not know packet version 5 never answer, see -forward-secrecy)")
+		s.state = "holding"
 	case !ready && s.state == "":
 		s.Log.Printf("send: waiting for a server to answer before sending records")
 		s.state = "holding"
@@ -144,13 +159,28 @@ func (s *Sender) readAcks(c packetConn) {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		ack, err := wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance)
-		if err != nil {
+		var ack wire.Ack
+		var from *peer
+		if s.fs() {
+			a, p := s.readReplyFS(buf[:n])
+			if p == nil {
+				continue
+			}
+			if a == nil {
+				// A finished handshake: the server listens, records can go.
+				s.notifyAck()
+				continue
+			}
+			ack, from = *a, p
+		} else if ack, err = wire.DecodeAck(buf[:n], s.Key, s.Host, s.BootID, s.Instance); err != nil {
 			continue
 		}
 		tx, ok := s.recentBeat(ack.SentAt)
 		if !ok {
 			continue
+		}
+		if from != nil {
+			s.peerAcked(from)
 		}
 		if ack.Upto > 0 {
 			for _, q := range []*Queue{s.First, s.Queue} {
@@ -159,11 +189,15 @@ func (s *Sender) readAcks(c packetConn) {
 				}
 			}
 		}
-		s.lastAck.Store(int64(time.Since(s.start)) + 1)
-		select {
-		case s.acked <- struct{}{}:
-		default:
-		}
+		s.notifyAck()
+	}
+}
+
+func (s *Sender) notifyAck() {
+	s.lastAck.Store(int64(time.Since(s.start)) + 1)
+	select {
+	case s.acked <- struct{}{}:
+	default:
 	}
 }
 
@@ -179,25 +213,39 @@ func (s *Sender) Run(ctx context.Context) {
 	retry := newBackoff(50*time.Millisecond, 2*time.Second)
 	nextBeat, lastBeat := time.Now(), time.Time{}
 	for ctx.Err() == nil {
+		// Time until the next handshake init, for version 5 only.
+		initWait := time.Duration(1<<63 - 1)
+		if s.fs() {
+			initWait = s.tickPeers()
+		}
 		ready := s.ready()
 		s.logState(ready)
 		if s.Heartbeat > 0 && (!time.Now().Before(nextBeat) || (ready && s.needConfirm() && time.Since(lastBeat) >= earlyBeat)) {
 			// A failed heartbeat is not retried: the next one carries newer counters.
 			beat := &wire.Packet{Kind: wire.KindHeartbeat, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start)), Oldest: s.oldest(),
 				AgentVersion: s.Version}
-			if ready {
+			switch {
+			case ready:
 				s.send(beat)
 				nextBeat = time.Now().Add(s.Heartbeat)
-			} else {
+			case !s.fs():
 				// A probe has seq 0, so probes nobody received do not count as missing packets.
 				s.write(beat)
 				nextBeat = time.Now().Add(min(time.Second, s.Heartbeat))
 			}
-			s.noteBeat(beat.SentAt, s.tx)
-			lastBeat = time.Now()
+			// With version 5 the handshake init is the probe, and the first heartbeat goes once it is answered.
+			if ready || !s.fs() {
+				s.noteBeat(beat.SentAt, s.tx)
+				lastBeat = time.Now()
+			}
 		}
 		if !ready {
-			s.wait(ctx, time.Until(nextBeat), false)
+			d := time.Until(nextBeat)
+			if s.fs() {
+				// No heartbeat is due while holding, only handshakes. The cap also covers servers not resolved yet.
+				d = min(initWait, wire.HandshakeRetry)
+			}
+			s.wait(ctx, d, false)
 			continue
 		}
 		q, it, ok := s.next()
@@ -206,7 +254,7 @@ func (s *Sender) Run(ctx context.Context) {
 			if s.needConfirm() {
 				wake = min(wake, time.Until(lastBeat.Add(earlyBeat)))
 			}
-			s.wait(ctx, wake, true)
+			s.wait(ctx, min(wake, initWait), true)
 			continue
 		}
 		err := s.sendItem(q, it)
@@ -338,6 +386,13 @@ func (s *Sender) send(p *wire.Packet) error {
 func (s *Sender) write(p *wire.Packet) error {
 	s.tx++
 	p.SentAt = time.Now().UnixNano()
+	if s.fs() {
+		out, err := s.sealFS(p)
+		if err != nil {
+			return err
+		}
+		return s.writeAll(out)
+	}
 	b, err := s.sealer.Seal(p)
 	if err != nil {
 		return err
@@ -347,6 +402,15 @@ func (s *Sender) write(p *wire.Packet) error {
 		s.Stats.SendErrors.Add(1)
 		return errNoAddr
 	}
+	out := make([]datagram, len(addrs))
+	for i, a := range addrs {
+		out[i] = datagram{b, a}
+	}
+	return s.writeAll(out)
+}
+
+// writeAll sends each datagram to its server. It succeeds if at least one write worked.
+func (s *Sender) writeAll(out []datagram) error {
 	if s.conn == nil {
 		c, err := s.newConn()
 		if err != nil {
@@ -360,8 +424,8 @@ func (s *Sender) write(p *wire.Packet) error {
 	}
 	sent := false
 	var lastErr error
-	for _, a := range addrs {
-		if _, err := s.conn.WriteTo(b, a); err != nil {
+	for _, d := range out {
+		if _, err := s.conn.WriteTo(d.b, d.addr); err != nil {
 			lastErr = err
 			s.Stats.SendErrors.Add(1)
 			continue

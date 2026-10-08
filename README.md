@@ -19,7 +19,7 @@ The agent assumes the worst: dead disk, broken DNS, no memory, kernel panic. It'
 **Agent** (`lastgasp-agent`)
 
 - reads `/dev/kmsg` and, after a crash, the logs the kernel saved in pstore
-- encrypts every line with AES-256-GCM and sends it over UDP, one line per packet
+- encrypts every line and sends it over UDP, one line per packet, with keys from a Noise handshake that change every 2 minutes, so a key stolen later cannot open old traffic
 - holds lines in memory until a server actually answers, so starting the agent before the server (or before you add its key) loses nothing
 - keeps each line until a server confirms it got it, and sends lost lines again
 - keeps unconfirmed lines in a RAM-only stash under `/run`, so an agent restart or upgrade does not lose them

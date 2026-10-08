@@ -60,6 +60,7 @@ func main() {
 		publicURL    = flag.String("public-url", "", "web UI address used for links in alerts, for example https://lastgasp.example.net")
 		showVer      = flag.Bool("version", false, "print the version and exit")
 		agentAddr    = flag.String("agent-address", "", "host:port agents send to, used in install commands. Default: the -public-url host with the -listen port")
+		requireFS    = flag.Bool("require-forward-secrecy", false, "refuse packets before version 5, which have no forward secrecy (agents with -wait-ack=false or -forward-secrecy=false)")
 		repoURL      = flag.String("repo-url", "https://git.fferrando.cc/rdfilippo/lastgasp", "repository whose releases hold the agent and its installer")
 	)
 	var webhooks, emails, telegrams stringList
@@ -154,6 +155,7 @@ func main() {
 		log.Info("no key in a key file, only enrolled agents are accepted")
 	}
 	in := server.NewIngestor(st, tr, keys, metrics, log)
+	in.RequireFS = *requireFS
 	enroller := &server.Enroller{Store: st, Keys: keys, Log: log, Results: metrics.Enrollments}
 	in.Enroller = enroller
 

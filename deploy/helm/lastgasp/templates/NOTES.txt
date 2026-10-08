@@ -1,0 +1,16 @@
+{{- if .Values.server.enabled }}
+Web UI:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lastgasp.fullname" . }}-http 8080:{{ .Values.server.service.http.port }}
+  then open http://127.0.0.1:8080
+{{- if not .Values.server.auth.existingSecret }}
+
+The UI has no login. Set server.auth.existingSecret before exposing it with an ingress.
+{{- end }}
+{{- end }}
+{{- if .Values.agent.enabled }}
+
+Agents send to {{ include "lastgasp.agentServer" . }} with the shared key from
+secret {{ include "lastgasp.keySecretName" . }}. Each node shows up under its node name.
+Check one node with:
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=agent --tail=20
+{{- end }}

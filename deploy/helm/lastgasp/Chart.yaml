@@ -1,0 +1,15 @@
+apiVersion: v2
+name: lastgasp
+description: Kernel log shipper. An agent on every node sends kernel logs to the lastgasp server.
+type: application
+# The release workflow sets both versions from the git tag.
+version: 0.1.1
+appVersion: "v0.1.1"
+home: https://git.fferrando.cc/rdfilippo/lastgasp
+sources:
+  - https://git.fferrando.cc/rdfilippo/lastgasp
+keywords:
+  - kernel
+  - logs
+  - kmsg
+  - pstore

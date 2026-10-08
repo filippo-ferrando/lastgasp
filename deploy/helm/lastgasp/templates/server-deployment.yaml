@@ -1,0 +1,182 @@
+{{- if .Values.server.enabled }}
+{{- $s := .Values.server }}
+{{- if gt (int $s.replicas) 1 }}
+{{- fail "server.replicas must be 0 or 1: each replica would only see part of the packets of a host" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-server
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ $s.replicas }}
+  # SQLite and a ReadWriteOnce volume allow one server at a time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "lastgasp.selectorLabels" (dict "ctx" . "component" "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lastgasp.selectorLabels" (dict "ctx" . "component" "server") | nindent 8 }}
+        {{- with $s.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # The server reads these files at start, so a change restarts it.
+        checksum/config: {{ list .Values.key $s.rules | toYaml | sha256sum }}
+        {{- with $s.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $s.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ $s.terminationGracePeriodSeconds }}
+      containers:
+        - name: server
+          image: {{ include "lastgasp.image" (dict "ctx" . "image" $s.image) }}
+          imagePullPolicy: {{ $s.image.pullPolicy }}
+          args:
+            - -listen=:5140
+            - -http=:8080
+            {{- if $s.database.url }}
+            - -db={{ $s.database.url }}
+            {{- else }}
+            - -db=/var/lib/lastgasp/lastgasp.db
+            {{- end }}
+            - -key-file=/etc/lastgasp/key/keys
+            {{- with $s.retain }}
+            - -retain={{ . }}
+            {{- end }}
+            {{- with $s.publicURL }}
+            - -public-url={{ . }}
+            {{- end }}
+            {{- with $s.agentAddress }}
+            - -agent-address={{ . }}
+            {{- end }}
+            {{- if $s.auth.existingSecret }}
+            - -auth-file=/etc/lastgasp/auth/auth
+            {{- end }}
+            {{- if and .Values.metrics.enabled .Values.metrics.requireAuth }}
+            - -auth-metrics
+            {{- end }}
+            {{- if $s.rules }}
+            - -rules=/etc/lastgasp/rules/rules
+            {{- end }}
+            {{- with $s.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or $s.database.passwordSecret.name $s.env }}
+          env:
+            {{- if $s.database.passwordSecret.name }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.database.passwordSecret.name }}
+                  key: {{ $s.database.passwordSecret.key }}
+            {{- end }}
+            {{- with $s.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - name: agents
+              containerPort: 5140
+              protocol: UDP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            {{- toYaml $s.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml $s.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/lastgasp
+            - name: tmp
+              mountPath: /tmp
+            - name: key
+              mountPath: /etc/lastgasp/key
+              readOnly: true
+            {{- if $s.auth.existingSecret }}
+            - name: auth
+              mountPath: /etc/lastgasp/auth
+              readOnly: true
+            {{- end }}
+            {{- if $s.rules }}
+            - name: rules
+              mountPath: /etc/lastgasp/rules
+              readOnly: true
+            {{- end }}
+            {{- with $s.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if and $s.persistence.enabled (not $s.database.url) }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "lastgasp.fullname" .)) $s.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: key
+          secret:
+            secretName: {{ include "lastgasp.keySecretName" . }}
+            items:
+              - key: keys
+                path: keys
+            defaultMode: 0440
+        {{- if $s.auth.existingSecret }}
+        - name: auth
+          secret:
+            secretName: {{ $s.auth.existingSecret }}
+            items:
+              - key: auth
+                path: auth
+            defaultMode: 0440
+        {{- end }}
+        {{- if $s.rules }}
+        - name: rules
+          configMap:
+            name: {{ include "lastgasp.fullname" . }}-rules
+        {{- end }}
+        {{- with $s.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $s.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

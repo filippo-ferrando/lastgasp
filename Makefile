@@ -4,7 +4,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X lastgasp/internal/version.Version=$(VERSION)
 ARCHES := amd64 arm64 arm
 
-.PHONY: all agent server test test-deploy test-examples image dist clean
+.PHONY: all agent server test test-deploy test-examples test-chart image image-agent dist clean
 
 all: agent server
 
@@ -15,7 +15,7 @@ agent:
 server:
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o bin/lastgasp-server ./cmd/lastgasp-server
 
-test: test-deploy test-examples
+test: test-deploy test-examples test-chart
 	go test -race ./...
 
 test-deploy:
@@ -24,8 +24,14 @@ test-deploy:
 test-examples:
 	sh examples/examples_test.sh
 
+test-chart:
+	sh deploy/helm/chart_test.sh
+
 image:
-	docker build --build-arg VERSION=$(VERSION) -t lastgasp-server:$(VERSION) -t lastgasp-server:latest .
+	docker build --build-arg VERSION=$(VERSION) --target server -t lastgasp-server:$(VERSION) -t lastgasp-server:latest .
+
+image-agent:
+	docker build --build-arg VERSION=$(VERSION) --target agent -t lastgasp-agent:$(VERSION) -t lastgasp-agent:latest .
 
 # Release files: agent and server for each architecture, the installer of this version, units, checksums.
 dist:

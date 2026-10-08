@@ -1,5 +1,5 @@
 # On a tag like v1.2.0: test, publish the agent, server and installer as release files,
-# and push a multi-arch server image to the Forgejo container registry.
+# push multi-arch server and agent images and the Helm chart to the Forgejo container registry.
 #
 # Repository secret LOCAL_TOKEN: an access token of the user that pushes the tag, with write:package.
 name: Release
@@ -24,6 +24,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      # For the chart checks in make test.
+      - uses: azure/setup-helm@v4
 
       - name: Vet
         run: go vet ./...
@@ -62,7 +65,9 @@ jobs:
             echo "curl -fsSL $SERVER_URL/$REPOSITORY/releases/download/$TAG/install-agent.sh | sudo sh -s -- --server SERVER:5140 --token TOKEN"
             echo '```'
             echo
-            echo "Server image: \`$image:$TAG\`"
+            echo "Server image: \`$image:$TAG\`, agent image: \`${image%-server}-agent:$TAG\`"
+            echo
+            echo "Helm chart: \`helm install lastgasp oci://$REGISTRY/${REPOSITORY%%/*}/lastgasp --version ${TAG#v}\`"
             echo
             echo "Changes${prev:+ since $prev}:"
             echo
@@ -104,16 +109,18 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          image=$(echo "$REGISTRY/$REPOSITORY-server" | tr '[:upper:]' '[:lower:]')
-          {
-            echo "tags<<EOF"
-            echo "$image:$TAG"
-            case $TAG in
-              *-*) ;;
-              *) minor=${TAG%.*}; echo "$image:${TAG#v}"; echo "$image:${minor#v}"; echo "$image:latest" ;;
-            esac
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          for part in server agent; do
+            image=$(echo "$REGISTRY/$REPOSITORY-$part" | tr '[:upper:]' '[:lower:]')
+            {
+              echo "$part<<EOF"
+              echo "$image:$TAG"
+              case $TAG in
+                *-*) ;;
+                *) minor=${TAG%.*}; echo "$image:${TAG#v}"; echo "$image:${minor#v}"; echo "$image:latest" ;;
+              esac
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          done
 
       # The Dockerfile cross compiles in its build stage, so arm64 needs no emulation.
       - name: Build and push server image
@@ -121,14 +128,46 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          target: server
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
             VERSION=${{ github.ref_name }}
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.tags.outputs.server }}
+
+      - name: Build and push agent image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: agent
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: ${{ steps.tags.outputs.agent }}
+
+  # The chart gets the version of the tag, and its default images are the ones pushed above.
+  chart:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package and push chart
+        env:
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          owner=$(echo "${REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.LOCAL_TOKEN }}" | helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          helm package deploy/helm/lastgasp --version "${TAG#v}" --app-version "$TAG" -d out
+          helm push "out/lastgasp-${TAG#v}.tgz" "oci://$REGISTRY/$owner"
 
   release:
-    needs: [build, image]
+    needs: [build, image, chart]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v3

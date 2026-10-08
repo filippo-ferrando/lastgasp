@@ -1,0 +1,11 @@
+{{- if and .Values.server.enabled .Values.server.rules }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-rules
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+data:
+  rules: |
+    {{- .Values.server.rules | nindent 4 }}
+{{- end }}

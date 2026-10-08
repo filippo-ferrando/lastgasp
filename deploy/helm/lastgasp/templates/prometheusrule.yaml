@@ -1,0 +1,49 @@
+{{- if and .Values.server.enabled .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+{{- $job := include "lastgasp.name" . }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "lastgasp.fullname" . }}
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Same rules as docs/operations.md.
+  groups:
+    - name: lastgasp
+      rules:
+        - alert: LastgaspServerDown
+          expr: up{job="{{ $job }}"} == 0
+          for: 2m
+        - alert: LastgaspAgentDown
+          expr: lastgasp_agent_up == 0
+          for: 5m
+          annotations:
+            summary: {{`"{{ $labels.host }} sent nothing for 5 minutes"`}}
+        - alert: LastgaspPacketsLost
+          expr: increase(lastgasp_packets_gap_total[15m]) > 100
+          annotations:
+            summary: {{`"{{ $labels.host }} lost {{ $value }} packets in 15 minutes"`}}
+        - alert: LastgaspAgentDropping
+          expr: increase(lastgasp_agent_buffer_dropped_total[15m]) > 0
+          annotations:
+            summary: {{`"agent on {{ $labels.host }} dropped records, its buffer was full"`}}
+        - alert: LastgaspAgentHolding
+          expr: lastgasp_agent_buffered_records > 1000
+          for: 10m
+          annotations:
+            summary: {{`"agent on {{ $labels.host }} keeps records it cannot send"`}}
+        - alert: LastgaspServerOverloaded
+          expr: increase(lastgasp_server_queue_dropped_total[5m]) > 0
+        - alert: LastgaspDatabaseErrors
+          expr: increase(lastgasp_store_errors_total[5m]) > 0 or increase(lastgasp_records_lost_total[5m]) > 0
+        - alert: LastgaspUnknownHosts
+          expr: increase(lastgasp_packets_invalid_total{reason=~"unknown_host|auth_failed"}[15m]) > 0
+          annotations:
+            summary: "packets with a missing or wrong key, check the key file"
+        - alert: LastgaspAlertsFailing
+          expr: increase(lastgasp_alerts_total{result="failed"}[30m]) > 3
+{{- end }}

@@ -9,7 +9,7 @@ CI runs on the Forgejo instance with Forgejo Actions. The workflows are in `.for
 
 ## Cut a release
 
-1. When the release needs an action on upgrade, write it in [upgrade-notes.md](upgrade-notes.md) under `## Unreleased`, and rename that heading to the tag. The release notes start with that section.
+1. When the release needs an action on upgrade, write it in [upgrade-notes.md](upgrade-notes.md) under `## Unreleased`, and rename that heading to the tag, with a new `## Unreleased` section above it (`make test` needs one). The release notes start with the section of the tag.
 2. Tag and push:
 
 ```sh

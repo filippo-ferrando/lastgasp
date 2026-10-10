@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -384,6 +385,25 @@ func TestPstoreAssignmentKeepsFirstAnswer(t *testing.T) {
 				t.Fatalf("second server got %q %v", b, err)
 			}
 		})
+	}
+}
+
+func TestOpenRetriesRefusedConnections(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	defer func(w time.Duration) { connectWait = w }(connectWait)
+	connectWait = 2500 * time.Millisecond
+	start := time.Now()
+	if _, err := Open("postgres://u@" + addr + "/db?sslmode=disable&connect_timeout=1"); err == nil {
+		t.Fatal("opened a closed port")
+	}
+	// A refused connection fails at once, so the time spent shows the retries.
+	if d := time.Since(start); d < 2*time.Second {
+		t.Fatalf("gave up after %v, want retries until connectWait", d)
 	}
 }
 

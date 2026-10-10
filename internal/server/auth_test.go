@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +385,27 @@ func TestSessionStoreExpiry(t *testing.T) {
 }
 
 // The page has no JS test setup, so this only checks that next is parsed and held to this origin.
+// The token expiry choices of the UI must all be ones the API accepts, up to one year.
+func TestTokenTTLChoicesAreAccepted(t *testing.T) {
+	b, _ := uiFS.ReadFile("ui/index.html")
+	sel := regexp.MustCompile(`(?s)<select id="tok-ttl".*?</select>`).Find(b)
+	vals := regexp.MustCompile(`value="([^"]+)"`).FindAllSubmatch(sel, -1)
+	if len(vals) == 0 {
+		t.Fatal("no expiry choices found")
+	}
+	var longest time.Duration
+	for _, v := range vals {
+		d, err := time.ParseDuration(string(v[1]))
+		if err != nil || d < time.Minute || d > 365*24*time.Hour {
+			t.Fatalf("expiry choice %q is refused by the API", v[1])
+		}
+		longest = max(longest, d)
+	}
+	if longest != 365*24*time.Hour {
+		t.Fatalf("longest expiry choice is %v, want one year", longest)
+	}
+}
+
 func TestLoginPageNextStaysOnThisServer(t *testing.T) {
 	b, _ := uiFS.ReadFile("ui/login.html")
 	if !strings.Contains(string(b), "new URL(") || !strings.Contains(string(b), "u.origin === location.origin") {

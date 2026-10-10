@@ -30,6 +30,11 @@ app.kubernetes.io/instance: {{ .ctx.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
+{{/* "true" when the server needs a key file: not when every agent enrolls and no other key is given. */}}
+{{- define "lastgasp.keyFile" -}}
+{{- if or .Values.key.existingSecret .Values.key.extraLines (not .Values.agent.enroll.tokenSecret.name) }}true{{ end }}
+{{- end }}
+
 {{- define "lastgasp.keySecretName" -}}
 {{- default (printf "%s-key" (include "lastgasp.fullname" .)) .Values.key.existingSecret }}
 {{- end }}

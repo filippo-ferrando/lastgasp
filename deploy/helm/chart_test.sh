@@ -81,6 +81,15 @@ hasnot "$e" "- -key-file=/etc/lastgasp/agent.key"
 sed -n 's/^  keys: //p' "$e" | base64 -d | grep -q '^\*' && fail "enroll: server key file still has a '*' line"
 hasnot "$d" "initContainers:"
 
+# Enrollment without other keys: no key secret, and the server runs without a key file.
+render enrollonly --set agent.enroll.tokenSecret.name=join
+hasnot "$TMP/enrollonly" "kind: Secret"
+hasnot "$TMP/enrollonly" "-key-file=/etc/lastgasp/key/keys"
+hasnot "$TMP/enrollonly" "mountPath: /etc/lastgasp/key"
+has "$TMP/enrollonly" "- -key-file=/var/lib/lastgasp/agent.key"
+render enrollexisting --set agent.enroll.tokenSecret.name=join --set key.existingSecret=mykey
+has "$TMP/enrollexisting" "- -key-file=/etc/lastgasp/key/keys"
+
 # A device plugin gives /dev/kmsg, so the host path is left out. Images can be pinned by digest.
 dig=sha256:$(printf '%064d' 1)
 render nokmsg --set agent.kmsgHostPath=false --set agent.podSecurityContext.seLinuxOptions.type=spc_t --set agent.image.digest=$dig --set server.image.digest=$dig

@@ -58,6 +58,9 @@ type Store struct {
 	postgres bool
 }
 
+// connectWait is how long Open retries a database that does not answer yet.
+var connectWait = 30 * time.Second
+
 // Open connects to PostgreSQL when dsn starts with postgres:// or postgresql://, otherwise opens a SQLite file.
 func Open(dsn string) (*Store, error) {
 	s := &Store{postgres: strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")}
@@ -81,9 +84,16 @@ func Open(dsn string) (*Store, error) {
 		// One connection avoids "database is locked" errors between writers.
 		s.db.SetMaxOpenConns(1)
 	}
-	ping, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ping, cancel := context.WithTimeout(context.Background(), connectWait)
 	defer cancel()
-	if err := s.db.PingContext(ping); err != nil {
+	// A new pod can be refused for a moment, for example until network policies know its address.
+	for err = s.db.PingContext(ping); err != nil && ping.Err() == nil; err = s.db.PingContext(ping) {
+		select {
+		case <-ping.Done():
+		case <-time.After(time.Second):
+		}
+	}
+	if err != nil {
 		s.db.Close()
 		return nil, fmt.Errorf("store: connect: %w", err)
 	}

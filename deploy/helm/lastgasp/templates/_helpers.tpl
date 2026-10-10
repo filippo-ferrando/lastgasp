@@ -46,5 +46,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
 {{- define "lastgasp.image" -}}
+{{- if .image.digest }}
+{{- printf "%s@%s" .image.repository .image.digest }}
+{{- else }}
 {{- printf "%s:%s" .image.repository (default .ctx.Chart.AppVersion .image.tag) }}
+{{- end }}
 {{- end }}

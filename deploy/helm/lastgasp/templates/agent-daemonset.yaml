@@ -1,5 +1,6 @@
 {{- if .Values.agent.enabled }}
 {{- $a := .Values.agent }}
+{{- $enroll := $a.enroll.tokenSecret.name }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -40,13 +41,54 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       {{- end }}
       automountServiceAccountToken: false
+      {{- with $a.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $enroll }}
+      initContainers:
+        # Gets a key of its own once, then keeps it on the node across pod restarts and reboots.
+        - name: enroll
+          image: {{ include "lastgasp.image" (dict "ctx" . "image" $a.image) }}
+          imagePullPolicy: {{ $a.image.pullPolicy }}
+          args:
+            - enroll
+            - -server={{ include "lastgasp.agentServer" . }}
+            - -token-file=/etc/lastgasp-join/token
+            - -hostname=$(NODE_NAME)
+            - -key-file=/var/lib/lastgasp/agent.key
+            - -if-missing
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: key
+              mountPath: /var/lib/lastgasp
+            - name: join
+              mountPath: /etc/lastgasp-join
+              readOnly: true
+      {{- end }}
       containers:
         - name: agent
           image: {{ include "lastgasp.image" (dict "ctx" . "image" $a.image) }}
           imagePullPolicy: {{ $a.image.pullPolicy }}
           args:
             - -server={{ include "lastgasp.agentServer" . }}
+            {{- if $enroll }}
+            - -key-file=/var/lib/lastgasp/agent.key
+            {{- else }}
             - -key-file=/etc/lastgasp/agent.key
+            {{- end }}
             # The node name, so logs are grouped by node and not by pod.
             - -hostname=$(NODE_NAME)
             {{- if not $a.pstore }}
@@ -76,8 +118,11 @@ spec:
           resources:
             {{- toYaml $a.resources | nindent 12 }}
           volumeMounts:
+            {{- if $a.kmsgHostPath }}
             - name: kmsg
               mountPath: /dev/kmsg
+              readOnly: true
+            {{- end }}
             {{- if $a.pstore }}
             - name: pstore
               mountPath: /sys/fs/pstore
@@ -88,13 +133,15 @@ spec:
               mountPath: /run/lastgasp
             {{- end }}
             - name: key
-              mountPath: /etc/lastgasp
+              mountPath: {{ ternary "/var/lib/lastgasp" "/etc/lastgasp" (not (empty $enroll)) }}
               readOnly: true
       volumes:
+        {{- if $a.kmsgHostPath }}
         - name: kmsg
           hostPath:
             path: /dev/kmsg
             type: CharDevice
+        {{- end }}
         {{- if $a.pstore }}
         - name: pstore
           hostPath:
@@ -108,6 +155,20 @@ spec:
             path: /run/lastgasp
             type: DirectoryOrCreate
         {{- end }}
+        {{- if $enroll }}
+        # Kept on the node disk, so a reboot does not need a new enrollment.
+        - name: key
+          hostPath:
+            path: {{ $a.enroll.keyDir }}
+            type: DirectoryOrCreate
+        - name: join
+          secret:
+            secretName: {{ $enroll }}
+            items:
+              - key: {{ $a.enroll.tokenSecret.key }}
+                path: token
+            defaultMode: 0400
+        {{- else }}
         - name: key
           secret:
             secretName: {{ include "lastgasp.keySecretName" . }}
@@ -115,6 +176,7 @@ spec:
               - key: agent.key
                 path: agent.key
             defaultMode: 0400
+        {{- end }}
       {{- with $a.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

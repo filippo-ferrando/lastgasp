@@ -37,13 +37,15 @@ Options:
   -h, --help           show this help
 
 Without --token, --key or --key-file, an existing key is kept, or a new one is created.
+The environment variables LASTGASP_TOKEN and LASTGASP_KEY can replace --token and --key.
+They keep the secret out of ps and the shell history, so prefer them.
 EOF
 }
 
 die() { echo "install-agent: $*" >&2; exit 1; }
 log() { echo "install-agent: $*"; }
 
-servers="" key="" key_file="" host="" binary="" extra="" token="" want_version=""
+servers="" key=${LASTGASP_KEY:-} key_file="" host="" binary="" extra="" token=${LASTGASP_TOKEN:-} want_version=""
 start=1 systemd=1 uninstall=0 purge=0
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -140,12 +142,16 @@ download() {
 	fetch "$url/lastgasp-agent-linux-$arch" "$DL/lastgasp-agent-linux-$arch" || die "download failed: $url/lastgasp-agent-linux-$arch"
 	fetch "$url/$UNIT" "$DL/$UNIT" || die "download failed: $url/$UNIT"
 	fetch "$url/SHA256SUMS" "$DL/SHA256SUMS" || die "download failed: $url/SHA256SUMS"
-	if command -v sha256sum >/dev/null 2>&1; then
-		(cd "$DL" && grep -E " [*]?(lastgasp-agent-linux-$arch|$UNIT)\$" SHA256SUMS | sha256sum -c - >/dev/null 2>&1) ||
-			die "checksum mismatch, the download is damaged or was changed"
-	else
-		log "warning: sha256sum not found, the download is not checked"
+	if command -v sha256sum >/dev/null 2>&1; then sum="sha256sum"
+	elif command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"
+	elif command -v openssl >/dev/null 2>&1; then sum="openssl dgst -sha256 -r"
+	else die "sha256sum, shasum or openssl is needed to check the download"
 	fi
+	for f in "lastgasp-agent-linux-$arch" "$UNIT"; do
+		want=$(grep -E " [*]?$f\$" "$DL/SHA256SUMS" | cut -d' ' -f1)
+		[ -n "$want" ] && [ "$($sum "$DL/$f" | cut -d' ' -f1)" = "$want" ] ||
+			die "checksum mismatch, the download is damaged or was changed"
+	done
 	binary="$DL/lastgasp-agent-linux-$arch"
 	chmod 755 "$binary"
 	unit_src="$DL/$UNIT"
@@ -186,7 +192,7 @@ chmod 700 "$ROOT$CONF_DIR"
 new_key=0
 if [ -n "$token" ]; then
 	# The agent gets its key from the server, so nobody copies keys around.
-	"$binary" enroll -server "$servers" -token "$token" ${host:+-hostname "$host"} -key-file "$ROOT$CONF_DIR/agent.key" ||
+	LASTGASP_TOKEN=$token "$binary" enroll -server "$servers" ${host:+-hostname "$host"} -key-file "$ROOT$CONF_DIR/agent.key" ||
 		die "enrollment failed, the agent was not installed"
 elif [ -n "$key" ]; then
 	echo "$key" > "$ROOT$CONF_DIR/agent.key"

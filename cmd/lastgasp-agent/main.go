@@ -109,23 +109,33 @@ func fatal(format string, args ...any) {
 func enroll(args []string) int {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	servers := fs.String("server", "", "host:port of the server, the first of a comma separated list is used (required)")
-	token := fs.String("token", "", "join token from the server web UI (required)")
+	token := fs.String("token", "", "join token from the server web UI (or use -token-file or LASTGASP_TOKEN)")
+	tokenFile := fs.String("token-file", "", "file holding the join token")
+	ifMissing := fs.Bool("if-missing", false, "do nothing when the key file already holds a valid key")
 	host := fs.String("hostname", "", "name sent to the server (default: kernel hostname)")
 	keyFile := fs.String("key-file", "/etc/lastgasp/agent.key", "where to save the key")
 	timeout := fs.Duration("timeout", 30*time.Second, "how long to wait for the server")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: lastgasp-agent enroll -server HOST:PORT -token TOKEN [flags]\n\nFlags:\n")
+		fmt.Fprintf(fs.Output(), "Usage: lastgasp-agent enroll -server HOST:PORT -token-file FILE [flags]\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
+	if *ifMissing && agent.HasKey(*keyFile) {
+		fmt.Printf("%s already holds a key, not enrolling\n", *keyFile)
+		return 0
+	}
 	server, _, _ := strings.Cut(*servers, ",")
-	if server == "" || *token == "" {
+	if server == "" {
 		fs.Usage()
+		return 2
+	}
+	tok, err := agent.EnrollToken(*token, *tokenFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "lastgasp-agent: enroll:", err)
 		return 2
 	}
 	name := *host
 	if name == "" {
-		var err error
 		if name, err = os.Hostname(); err != nil {
 			fmt.Fprintln(os.Stderr, "lastgasp-agent: cannot read hostname, use -hostname")
 			return 1
@@ -133,7 +143,7 @@ func enroll(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	key, err := agent.Enroll(ctx, strings.TrimSpace(server), name, strings.TrimSpace(*token))
+	key, err := agent.Enroll(ctx, strings.TrimSpace(server), name, tok)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "lastgasp-agent: enroll:", err)
 		return 1

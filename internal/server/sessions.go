@@ -10,6 +10,10 @@ import (
 // maxPending bounds the answered handshakes of one agent run that did not carry data yet.
 const maxPending = 4
 
+// maxRunsPerHost bounds the agent runs with sessions per host. A host has one agent run at a time,
+// a few more for 3 minutes after agent restarts or a reboot.
+const maxRunsPerHost = 16
+
 type liveSession struct {
 	s       *wire.Session
 	created time.Time
@@ -24,17 +28,46 @@ type runSessions struct {
 
 // Sessions keeps the version 5 sessions of every agent run, in memory only, so a server restart forgets them.
 type Sessions struct {
-	mu   sync.Mutex
-	runs map[ackKey]*runSessions
+	mu    sync.Mutex
+	hosts map[string]map[ackKey]*runSessions
+	n     int // agent runs in hosts
 }
 
-func NewSessions() *Sessions { return &Sessions{runs: map[ackKey]*runSessions{}} }
+func NewSessions() *Sessions { return &Sessions{hosts: map[string]map[ackKey]*runSessions{}} }
+
+func (t *Sessions) run(k ackKey) *runSessions { return t.hosts[k.host][k] }
+
+func (t *Sessions) drop(k ackKey) {
+	runs := t.hosts[k.host]
+	delete(runs, k)
+	t.n--
+	if len(runs) == 0 {
+		delete(t.hosts, k.host)
+	}
+}
+
+// evictOne drops a run without a confirmed session if there is one, else the run with the oldest session.
+func (t *Sessions) evictOne(runs map[ackKey]*runSessions) {
+	var oldest *ackKey
+	for k, r := range runs {
+		if r.current.s == nil {
+			t.drop(k)
+			return
+		}
+		if oldest == nil || r.current.created.Before(runs[*oldest].current.created) {
+			oldest = &k
+		}
+	}
+	if oldest != nil {
+		t.drop(*oldest)
+	}
+}
 
 // Fresh reports whether a handshake init with this number was not answered yet, so a replayed init is refused.
 func (t *Sessions) Fresh(k ackKey, number uint64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	r := t.runs[k]
+	r := t.run(k)
 	return r == nil || number > r.lastInit
 }
 
@@ -43,17 +76,36 @@ func (t *Sessions) Fresh(k ackKey, number uint64) bool {
 func (t *Sessions) Add(k ackKey, number uint64, s *wire.Session, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	r := t.runs[k]
+	r := t.run(k)
 	if r == nil {
-		if len(t.runs) >= cacheLimit {
+		if t.n >= cacheLimit {
 			t.sweep(now)
 		}
-		if len(t.runs) >= cacheLimit {
-			// Agents start a new handshake once their acks stop, so this only costs a short pause.
-			clear(t.runs)
+		if t.n >= cacheLimit {
+			// Working sessions are kept, an agent that lost its run starts a new handshake once its acks stop.
+			for _, runs := range t.hosts {
+				for other, o := range runs {
+					if o.current.s == nil {
+						t.drop(other)
+					}
+				}
+			}
+		}
+		if t.n >= cacheLimit {
+			for _, runs := range t.hosts {
+				t.evictOne(runs)
+				break
+			}
+		}
+		if runs := t.hosts[k.host]; len(runs) >= maxRunsPerHost {
+			t.evictOne(runs)
+		}
+		if t.hosts[k.host] == nil {
+			t.hosts[k.host] = map[ackKey]*runSessions{}
 		}
 		r = &runSessions{}
-		t.runs[k] = r
+		t.hosts[k.host][k] = r
+		t.n++
 	}
 	r.lastInit = max(r.lastInit, number)
 	if len(r.pending) >= maxPending {
@@ -70,7 +122,7 @@ func alive(l liveSession, now time.Time) bool {
 func (t *Sessions) Lookup(k ackKey, id uint32, now time.Time) *wire.Session {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	r := t.runs[k]
+	r := t.run(k)
 	if r == nil {
 		return nil
 	}
@@ -90,7 +142,7 @@ func (t *Sessions) Lookup(k ackKey, id uint32, now time.Time) *wire.Session {
 func (t *Sessions) Confirm(k ackKey, s *wire.Session) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	r := t.runs[k]
+	r := t.run(k)
 	if r == nil || r.current.s == s {
 		return
 	}
@@ -111,22 +163,24 @@ func (t *Sessions) Sweep(now time.Time) {
 }
 
 func (t *Sessions) sweep(now time.Time) {
-	for k, r := range t.runs {
-		if !alive(r.current, now) {
-			r.current = liveSession{}
-		}
-		if !alive(r.previous, now) {
-			r.previous = liveSession{}
-		}
-		kept := r.pending[:0]
-		for _, l := range r.pending {
-			if alive(l, now) {
-				kept = append(kept, l)
+	for _, runs := range t.hosts {
+		for k, r := range runs {
+			if !alive(r.current, now) {
+				r.current = liveSession{}
 			}
-		}
-		r.pending = kept
-		if r.current.s == nil && r.previous.s == nil && len(r.pending) == 0 {
-			delete(t.runs, k)
+			if !alive(r.previous, now) {
+				r.previous = liveSession{}
+			}
+			kept := r.pending[:0]
+			for _, l := range r.pending {
+				if alive(l, now) {
+					kept = append(kept, l)
+				}
+			}
+			r.pending = kept
+			if r.current.s == nil && r.previous.s == nil && len(r.pending) == 0 {
+				t.drop(k)
+			}
 		}
 	}
 }
@@ -135,5 +189,5 @@ func (t *Sessions) sweep(now time.Time) {
 func (t *Sessions) Len() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.runs)
+	return t.n
 }

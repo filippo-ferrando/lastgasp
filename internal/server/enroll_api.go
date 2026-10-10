@@ -71,7 +71,7 @@ func (a *API) enrollTokens(w http.ResponseWriter, r *http.Request) {
 func (a *API) createEnrollToken(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Comment string `json:"comment"`
-		Uses    int    `json:"uses"` // 0 for no limit
+		Uses    *int   `json:"uses"` // default 1, 0 for no limit
 		TTL     string `json:"ttl"`  // default 24h
 	}
 	if !readJSON(w, r, &b) {
@@ -86,7 +86,11 @@ func (a *API) createEnrollToken(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = d
 	}
-	if b.Uses < 0 {
+	uses := 1
+	if b.Uses != nil {
+		uses = *b.Uses
+	}
+	if uses < 0 {
 		http.Error(w, "uses must be 0 (no limit) or more", http.StatusBadRequest)
 		return
 	}
@@ -94,7 +98,7 @@ func (a *API) createEnrollToken(w http.ResponseWriter, r *http.Request) {
 	rand.Read(raw[:])
 	token := "lgj_" + hex.EncodeToString(raw[:])
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	t := store.EnrollToken{Comment: b.Comment, UsesLeft: b.Uses, ExpiresAt: now.Add(ttl), CreatedBy: userName(r), CreatedAt: now}
+	t := store.EnrollToken{Comment: b.Comment, UsesLeft: uses, ExpiresAt: now.Add(ttl), CreatedBy: userName(r), CreatedAt: now}
 	if t.UsesLeft == 0 {
 		t.UsesLeft = -1
 	}

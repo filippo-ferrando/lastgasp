@@ -49,7 +49,7 @@ In the UI, the Agents section has an "add agents" button. It makes a join token 
 curl -fsSL https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/install-agent.sh | sudo sh -s -- --server 10.0.0.5:5140 --token lgj_3f9a...
 ```
 
-Run it on the machine to watch. The script downloads the agent of the same release, checks it against the release checksums, enrolls it, and starts the service. Enrolling gives the agent its own key: the agent and the server agree on it over UDP, and the key is never sent over the network. A token works for 1 agent, 10 agents or any number, for 1 hour up to 7 days, and can be revoked.
+Run it on the machine to watch. The script downloads the agent of the same release, checks it against the release checksums, enrolls it, and starts the service. Enrolling gives the agent its own key: the agent and the server agree on it over UDP, and the key is never sent over the network. A token works for 1 agent (the default), 10 agents or any number, for 1 hour up to 7 days, and can be revoked.
 
 The agent log shows the connection:
 

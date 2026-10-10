@@ -202,6 +202,8 @@ func (n *Notifier) link(id int64) string {
 	return strings.TrimRight(n.PublicURL, "/") + "/#incident=" + strconv.FormatInt(id, 10)
 }
 
+var slackEscape = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
 func (n *Notifier) send(ctx context.Context, p *store.PendingAlert) error {
 	switch {
 	case n.Email != nil:
@@ -215,7 +217,8 @@ func (n *Notifier) send(ctx context.Context, p *store.PendingAlert) error {
 	var body []byte
 	switch n.Format {
 	case "slack":
-		body, _ = json.Marshal(map[string]string{"text": text})
+		// Kernel lines are not trusted, and Slack and Mattermost read <...> as links and mentions.
+		body, _ = json.Marshal(map[string]string{"text": slackEscape.Replace(text)})
 	case "alertmanager":
 		body, _ = json.Marshal([]amAlert{n.amAlert(inc, p.Resolve)})
 	default:

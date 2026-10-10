@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -354,5 +355,29 @@ func TestSelfCheckReplays(t *testing.T) {
 	}
 	if len(l) != 1 || l[0].Rule != "replay" || l[0].Count != replayMin {
 		t.Fatalf("incidents %+v", l)
+	}
+}
+
+func TestSessionsFullTableKeepsWorkingOnes(t *testing.T) {
+	ss := NewSessions()
+	now := time.Now()
+	run := func(host string, i int) ackKey { return ackKey{host, [16]byte{1}, uint64(i)} }
+	live := run("node-1", 0)
+	ss.Add(live, 1, &wire.Session{ID: 1}, now)
+	ss.Confirm(live, ss.Lookup(live, 1, now))
+	// One host with many runs keeps its working one and at most maxRunsPerHost.
+	for i := 1; i < 100; i++ {
+		ss.Add(run("node-1", i), 1, &wire.Session{ID: 2}, now)
+	}
+	if ss.Len() != maxRunsPerHost || ss.Lookup(live, 1, now) == nil {
+		t.Fatalf("%d runs, working session lost: %v", ss.Len(), ss.Lookup(live, 1, now) == nil)
+	}
+	// Handshakes with made up runs fill the table: the working session stays.
+	for i := 0; ss.Len() < cacheLimit; i++ {
+		ss.Add(run(strconv.Itoa(i/maxRunsPerHost), i), 1, &wire.Session{ID: 2}, now)
+	}
+	ss.Add(run("new", 0), 1, &wire.Session{ID: 3}, now)
+	if ss.Lookup(live, 1, now) == nil || ss.Lookup(run("new", 0), 3, now) == nil || ss.Len() >= cacheLimit {
+		t.Fatalf("full table: %d runs", ss.Len())
 	}
 }

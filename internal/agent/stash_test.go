@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"lastgasp/internal/wire"
@@ -108,5 +109,12 @@ func TestStashKeepsQueuesApart(t *testing.T) {
 	got, _ := s.recover([16]byte{1})
 	if len(got) != 1 || got[0].Rec.Msg != "kmsg" {
 		t.Fatalf("recovered %v", msgs(got))
+	}
+}
+
+func TestDropOversized(t *testing.T) {
+	items := []Item{kmsgItem(1, "ok"), kmsgItem(2, strings.Repeat("x", 11)), kmsgItem(3, "fine")}
+	if got := msgs(dropOversized(items, 10, nil)); len(got) != 2 || got[0] != "ok" || got[1] != "fine" {
+		t.Fatalf("got %v", got)
 	}
 }

@@ -19,7 +19,7 @@ Open `http://127.0.0.1:8080`: every node shows up under its node name with its b
 | Deployment `<release>-server` | the server, 0 or 1 replica, `Recreate` updates |
 | Service `<release>-udp` | agent packets, UDP 5140 |
 | Service `<release>-http` | web UI, API and `/metrics`, TCP 8080 |
-| Secret `<release>-key` | the shared agent key and the server key file |
+| Secret `<release>-key` | the shared agent key and the server key file (without the `*` line when agents enroll) |
 | PersistentVolumeClaim `<release>-data` | the SQLite database. Kept on `helm uninstall` |
 | Ingress, ServiceMonitor, PrometheusRule, ConfigMap | only when turned on |
 
@@ -34,6 +34,15 @@ key=$(openssl rand -hex 32)
 kubectl -n lastgasp create secret generic lastgasp-key --from-literal=agent.key=$key --from-literal=keys="*  $key"
 ```
 
+With one shared key, any node can send records as any other node. To give each node its own key, make a join token in the web UI (Agents, set a long expiry and no use limit, as new nodes use it too), store it in a secret and set `agent.enroll.tokenSecret.name`:
+
+```sh
+kubectl -n lastgasp create secret generic lastgasp-join --from-literal=token=lgj_...
+helm upgrade lastgasp oci://git.fferrando.cc/rdfilippo/lastgasp -n lastgasp --reuse-values --set agent.enroll.tokenSecret.name=lastgasp-join
+```
+
+An init container then enrolls each node once and keeps its key in `agent.enroll.keyDir` (`/var/lib/lastgasp`) on the node, and the server key file loses its `*` line. A node holding the token can only enroll names that are not enrolled yet, so it cannot take over another node. After a node is reinstalled, its old key is gone: revoke the node in the web UI, and the agent pod enrolls again on its next restart.
+
 Machines outside the cluster can use their own keys: add `host hexkey` lines with `key.extraLines`, or enroll them with a join token from the UI as usual. For that, expose the UDP service (`server.service.udp.type: LoadBalancer` or `NodePort`) and set `server.agentAddress` to the address they reach.
 
 ## The agent pod
@@ -41,12 +50,47 @@ Machines outside the cluster can use their own keys: add `host hexkey` lines wit
 | Setting | Why |
 | --- | --- |
 | `privileged: true` | the container runtime allows `/dev/kmsg` only to privileged containers. It also gives `CAP_SYSLOG` and `CAP_IPC_LOCK` for reading the log and locking memory |
-| hostPath `/dev/kmsg` | the kernel log of the node |
+| hostPath `/dev/kmsg`, read only | the kernel log of the node. Left out with `agent.kmsgHostPath: false` |
 | hostPath `/sys/fs/pstore`, read only | crash logs from the previous boot. Turn off with `agent.pstore: false` on nodes without pstore, or the pod does not start |
 | hostPath `/run/lastgasp` | the stash. `/run` on the node is tmpfs, so unconfirmed records survive an agent restart or upgrade but not a reboot |
 | `-hostname=$(NODE_NAME)` | logs are grouped by node name, not by pod name |
 | `priorityClassName: system-node-critical` | the agent is scheduled first and is the last one the OOM killer picks. It also sets its own `oom_score_adj` to -1000 |
 | tolerations `operator: Exists` | runs on every node, whatever its taints |
+
+### Without a privileged container
+
+A privileged agent is root on every node. A device plugin can give the container `/dev/kmsg` instead, like [generic-device-plugin](https://github.com/squat/generic-device-plugin) started with `--device '{"name": "kmsg", "groups": [{"paths": [{"path": "/dev/kmsg"}]}]}'`, which adds the `squat.ai/kmsg` resource. The agent then needs only three capabilities: `SYSLOG` to read the log, `IPC_LOCK` to lock its memory and `SYS_RESOURCE` for its memory lock limit and OOM score.
+
+```yaml
+agent:
+  kmsgHostPath: false
+  # Needed on SELinux nodes (like RHEL, Alma, Rocky, Fedora), where container_t may not read
+  # /dev/kmsg and pstore or write the host paths. Ignored on nodes without SELinux.
+  podSecurityContext:
+    seLinuxOptions:
+      type: spc_t
+  securityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsUser: 0
+    capabilities:
+      drop: [ALL]
+      add: [SYSLOG, IPC_LOCK, SYS_RESOURCE]
+    seccompProfile:
+      type: RuntimeDefault
+  resources:
+    requests:
+      cpu: 10m
+      memory: 96Mi
+    limits:
+      memory: 128Mi
+      squat.ai/kmsg: 1
+```
+
+On nodes without SELinux, leave `podSecurityContext` out or keep it: the runtime ignores the SELinux type there, so one set of values fits a mixed cluster. `spc_t` turns off SELinux checks for the agent only. The capability, seccomp and device limits still apply. A policy module made with udica can replace it when stricter rules are needed.
+
+Images can be pinned with `server.image.digest` and `agent.image.digest` (`sha256:...`), which win over the tag.
 
 The agent sends to `<release>-udp.<namespace>.svc.cluster.local.:5140`. It looks the address up once and keeps it when DNS fails later, so a broken cluster DNS does not stop it.
 

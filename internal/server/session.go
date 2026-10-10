@@ -37,18 +37,30 @@ func tokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// sessionUser returns the user of the session cookie, or nil. The user must still be in the auth file,
-// so removing a user ends its sessions, and a changed role applies at once.
+// sessionName is what a session stores: the user name and a short hash of its auth file hash.
+// Names never hold spaces, as the auth file splits on them.
+func sessionName(u *User) string {
+	sum := sha256.Sum256([]byte(u.hash))
+	return u.Name + " " + hex.EncodeToString(sum[:8])
+}
+
+// sessionUser returns the user of the session cookie, or nil. The user must still be in the auth file
+// with the same password, so removing a user or changing its password ends its sessions.
 func (a *Auth) sessionUser(r *http.Request, users *Users) *User {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || a.Sessions == nil || c.Value == "" {
 		return nil
 	}
-	name, err := a.Sessions.SessionUser(r.Context(), tokenHash(c.Value), time.Now())
+	stored, err := a.Sessions.SessionUser(r.Context(), tokenHash(c.Value), time.Now())
 	if err != nil {
 		return nil
 	}
-	return users.byName[name]
+	name, _, _ := strings.Cut(stored, " ")
+	user := users.byName[name]
+	if user == nil || sessionName(user) != stored {
+		return nil
+	}
+	return user
 }
 
 func (a *Auth) setCookie(w http.ResponseWriter, r *http.Request, value string, expires time.Time) {
@@ -98,7 +110,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	if ttl <= 0 {
 		ttl = 7 * 24 * time.Hour
 	}
-	if err := a.Sessions.CreateSession(r.Context(), tokenHash(token), user.Name, now.Add(ttl), now); err != nil {
+	if err := a.Sessions.CreateSession(r.Context(), tokenHash(token), sessionName(user), now.Add(ttl), now); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

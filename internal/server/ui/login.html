@@ -35,8 +35,12 @@ button:disabled { opacity: .6; cursor: default; }
 const $ = id => document.getElementById(id);
 // Only paths on this server, so the login page cannot send the user elsewhere.
 const next = (() => {
-  const n = new URLSearchParams(location.search).get("next") || "/";
-  return n.startsWith("/") && !n.startsWith("//") && !n.startsWith("/\\") ? n : "/";
+  try {
+    const u = new URL(new URLSearchParams(location.search).get("next") || "/", location.origin);
+    return u.origin === location.origin ? u.pathname + u.search + u.hash : "/";
+  } catch {
+    return "/";
+  }
 })();
 $("login").onsubmit = async e => {
   e.preventDefault();

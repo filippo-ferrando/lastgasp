@@ -17,6 +17,26 @@ RestartSec=1
 OOMScoreAdjust=-1000
 LimitMEMLOCK=infinity
 Nice=-10
+# Runs as root. CAP_SYSLOG reads /dev/kmsg, CAP_IPC_LOCK locks memory, CAP_SYS_RESOURCE sets oom_score_adj.
+CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK CAP_SYS_RESOURCE
+NoNewPrivileges=yes
+# The stash lives here and must survive restarts. Another -stash path needs its own ReadWritePaths.
+RuntimeDirectory=lastgasp
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
+ProtectHome=yes
+# No PrivateDevices, ProtectKernelLogs or ProtectClock: each one hides /dev/kmsg.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=sysinit.target

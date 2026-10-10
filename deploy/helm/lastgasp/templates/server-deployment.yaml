@@ -39,6 +39,7 @@ spec:
       {{- with $s.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      automountServiceAccountToken: false
       securityContext:
         {{- toYaml $s.podSecurityContext | nindent 8 }}
       terminationGracePeriodSeconds: {{ $s.terminationGracePeriodSeconds }}

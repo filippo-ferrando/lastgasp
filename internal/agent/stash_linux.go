@@ -25,26 +25,39 @@ func OpenStash(path string, size int, boot [16]byte, log *Logger) (*Stash, []Ite
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, err
 	}
+	// The directory is checked first, so no file is ever created on a disk.
 	var fs syscall.Statfs_t
 	if err := syscall.Statfs(dir, &fs); err != nil {
 		return nil, nil, err
 	}
-	// The field is int32 on 32 bit systems, where the ramfs magic looks negative.
-	if t := uint32(fs.Type); t != tmpfsMagic && t != ramfsMagic {
-		return nil, nil, fmt.Errorf("stash: %s is not on tmpfs or ramfs, refusing to write records to a disk", dir)
+	if err := inMemory(&fs, dir); err != nil {
+		return nil, nil, err
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	// O_NOFOLLOW refuses a symlink planted at path, so only the file itself is ever truncated.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer f.Close()
+	if err := syscall.Fstatfs(int(f.Fd()), &fs); err != nil {
+		return nil, nil, err
+	}
+	if err := inMemory(&fs, path); err != nil {
+		return nil, nil, err
+	}
 	st, err := f.Stat()
 	if err != nil {
 		return nil, nil, err
 	}
+	if !st.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("stash: %s is not a regular file", path)
+	}
 	want := int64(stashHeader + size)
 	var items []Item
-	if old := st.Size(); old >= stashHeader+MinStash && old <= stashHeader+MaxStash {
+	// A file bigger than the configured ring is not read, so a grown file cannot use up memory.
+	if old := st.Size(); old > want {
+		log.Printf("stash: file of %d bytes is bigger than the ring, starting empty", old)
+	} else if old >= stashHeader+MinStash {
 		mem, err := syscall.Mmap(int(f.Fd()), 0, int(old), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 		if err != nil {
 			return nil, nil, err
@@ -71,4 +84,12 @@ func OpenStash(path string, size int, boot [16]byte, log *Logger) (*Stash, []Ite
 	s := newStash(mem, func() error { return syscall.Munmap(mem) })
 	s.reset(boot)
 	return s, items, nil
+}
+
+func inMemory(fs *syscall.Statfs_t, name string) error {
+	// The field is int32 on 32 bit systems, where the ramfs magic looks negative.
+	if t := uint32(fs.Type); t != tmpfsMagic && t != ramfsMagic {
+		return fmt.Errorf("stash: %s is not on tmpfs or ramfs, refusing to write records to a disk", name)
+	}
+	return nil
 }

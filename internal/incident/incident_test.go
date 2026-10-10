@@ -345,13 +345,14 @@ func TestNotifierSlackFormat(t *testing.T) {
 	defer srv.Close()
 	n := &Notifier{Store: e.st, Name: "hook", URL: srv.URL, Format: "slack", Metrics: e.d.Metrics, Log: e.d.Log}
 	n.init()
-	e.add(t, "h", "b1", "kmsg", e.t0, "Kernel panic - not syncing: x")
+	e.add(t, "h", "b1", "kmsg", e.t0, "Kernel panic - not syncing: <!channel> <https://evil|fix> & x")
 	if err := n.flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	var body map[string]string
 	json.Unmarshal([]byte(h.bodies[0]), &body)
-	if len(body) != 1 || !strings.Contains(body["text"], "Kernel panic") || h.sigs[0] != "" {
+	if len(body) != 1 || !strings.Contains(body["text"], "Kernel panic") || h.sigs[0] != "" ||
+		!strings.Contains(body["text"], "&lt;!channel&gt; &lt;https://evil|fix&gt; &amp; x") {
 		t.Fatalf("body %v sig %q", body, h.sigs[0])
 	}
 }

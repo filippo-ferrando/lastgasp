@@ -239,9 +239,19 @@ func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 			nameKey = "user:" + limitName(name)
 			keys = append(keys, nameKey)
 		}
+		var user *User
+		tok, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !basic && !bearer {
+			user = a.sessionUser(r, users)
+		}
+		session := user != nil
 		// A blocked client is refused before any password check, which also saves the bcrypt work.
+		// A valid session skips the block, so failures from a shared proxy address do not lock out its users.
+		d := time.Duration(0)
+		if !session {
+			d = a.limit.wait(ipKey)
+		}
 		// A blocked user name still gets through from an address without failures, so others cannot lock it out.
-		d := a.limit.wait(ipKey)
 		if nameKey != "" && a.limit.failed(ipKey) {
 			d = max(d, a.limit.wait(nameKey))
 		}
@@ -253,14 +263,10 @@ func (a *Auth) Require(min Role, h http.Handler) http.Handler {
 			http.Error(w, "too many failed logins, try again later", http.StatusTooManyRequests)
 			return
 		}
-		var user *User
-		session := false
 		if basic {
 			user = users.Basic(name, pass)
-		} else if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+		} else if bearer {
 			user = users.Bearer(strings.TrimSpace(tok))
-		} else if user = a.sessionUser(r, users); user != nil {
-			session = true
 		}
 		if user == nil {
 			if r.Header.Get("Authorization") != "" {

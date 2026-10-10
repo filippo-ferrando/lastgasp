@@ -126,7 +126,7 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 		var err error
 		if stash, recovered, err = OpenStash(cfg.StashPath, cfg.StashSize, bootID, log); err != nil {
 			log.Printf("stash: %v, records are not kept across restarts", err)
-		} else if len(recovered) > 0 {
+		} else if recovered = dropOversized(recovered, maxMsg, log); len(recovered) > 0 {
 			log.Printf("stash: %d records from the previous run will be sent again", len(recovered))
 			items = append(items, recovered...)
 		}

@@ -12,15 +12,15 @@ An admin makes a join token in the UI (Agents, "add agents") or with the API, an
 
 | Token setting | Choices in the UI | API field |
 | --- | --- | --- |
-| uses | 1 agent, 10 agents, no limit | `uses`, 0 for no limit |
+| uses | 1 agent (default), 10 agents, any number of agents | `uses`, 1 when left out, 0 for no limit |
 | valid for | 1 hour, 24 hours, 7 days | `ttl`, from 1m to 8760h |
 | comment | free text | `comment` |
 
 - The token is shown once. The database keeps its hash.
-- Enrolling a host again (a reinstall) replaces its key. A host that has its own line in the key file cannot enroll: the file wins.
+- An enrolled host cannot enroll again, so a token cannot take over its key. To enroll it again (a reinstall on a new disk), revoke its key in the Agents table first. Running the install script again on the same machine keeps the key and needs no revoke. A host that has its own line in the key file cannot enroll: the file wins.
 - Revoking a token stops new enrollments. Revoking an agent key in the Agents table refuses the packets of that host until it enrolls again.
-- Each address may try a few times per second, and is ignored for 10 minutes after 10 wrong tokens. A wrong token gets a short answer, smaller than the request, so the port cannot be used to amplify traffic.
-- Only a client with a usable token learns whether a host has a line in the key file.
+- Each address may try a few times per second, all addresses together 20 times per second, and an address is ignored for 10 minutes after 10 wrong tokens. A wrong token gets a short answer, smaller than the request, so the port cannot be used to amplify traffic.
+- Only a client with a usable token learns whether a host has a line in the key file or is enrolled.
 
 The install command uses `-agent-address` (default: the `-public-url` host with the `-listen` port) and the release of the server version from `-repo-url`. Development builds use the newest installer from the main branch, which installs the newest release.
 
@@ -170,7 +170,7 @@ Bad values stop the server at start with a clear message. Without `-auth-file`, 
 | Check | Answers |
 | --- | --- |
 | `GET /healthz` | always `ok` while the process serves HTTP. For liveness checks |
-| `GET /readyz` | `ok` when the database answers within 3 seconds, the UDP reader and the ingest worker run, and the ingest queue is below 90%. Otherwise 503 with the reason. For readiness checks and load balancers |
+| `GET /readyz` | `ok` when the database answers within 3 seconds, the UDP reader and the ingest worker run, and the ingest queue is below 90%. Otherwise 503 `not ready`, with the reason in the server log. For readiness checks and load balancers |
 | `lastgasp-server health [URL]` | exits 0 when the URL (default `http://127.0.0.1:8080/readyz`) answers 200. For images without curl |
 
 Both endpoints are open without a login.

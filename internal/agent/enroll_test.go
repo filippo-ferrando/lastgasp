@@ -83,3 +83,37 @@ func TestEnrollNoAnswer(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestEnrollToken(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(file, []byte(" lgj_file\n"), 0o600)
+	t.Setenv("LASTGASP_TOKEN", " lgj_env ")
+	for _, c := range []struct{ token, file, want string }{
+		{"lgj_flag", "", "lgj_flag"},
+		{"", file, "lgj_file"},
+		{"", "", "lgj_env"},
+		{"lgj_flag", file, ""},
+		{"", filepath.Join(t.TempDir(), "missing"), ""},
+	} {
+		got, err := EnrollToken(c.token, c.file)
+		if got != c.want || (err == nil) != (c.want != "") {
+			t.Errorf("EnrollToken(%q, %q) = %q, %v", c.token, c.file, got, err)
+		}
+	}
+	t.Setenv("LASTGASP_TOKEN", "")
+	if _, err := EnrollToken("", ""); err == nil {
+		t.Error("no token accepted")
+	}
+}
+
+func TestHasKey(t *testing.T) {
+	dir := t.TempDir()
+	good, bad := filepath.Join(dir, "good"), filepath.Join(dir, "bad")
+	if err := WriteKeyFile(good, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(bad, []byte("not hex\n"), 0o600)
+	if !HasKey(good) || HasKey(bad) || HasKey(filepath.Join(dir, "missing")) {
+		t.Fatal("HasKey is wrong")
+	}
+}

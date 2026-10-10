@@ -123,7 +123,7 @@ For key file lines:
 | Enrollment: "no answer from the server" | UDP to the server port is blocked, the address is wrong, or the server is older than enrollment. Check `lastgasp_enrollments_total` on the server: no change means no packet arrived |
 | Enrollment: "the server refused the token" | the token is wrong, expired, revoked or used up. Make a new one. `lastgasp_enrollments_total{result="bad_token"}` grows |
 | Enrollment: "has its own line" | the host is in the key file, which wins over enrollment. Use that key, or remove the line and reload |
-| `/readyz` answers 503 | the reason is in the body: the database does not answer, the UDP reader or the ingest worker stopped, or the ingest queue is almost full |
+| `/readyz` answers 503 | the reason is in the server log (`not ready`): the database does not answer, the UDP reader or the ingest worker stopped, or the ingest queue is almost full |
 | Logs table empty, host shows up | Only heartbeats arrive. The agent replay went nowhere (older agents without acks), or the machine is quiet. Test with `echo test > /dev/kmsg` on the host |
 | Host does not show up at all | No valid packet arrives. Check `lastgasp_packets_invalid_total` by reason, the firewall, and `journalctl -u lastgasp-agent` |
 | `unknown_host` grows | The host name is not in the key file and there is no `*` line. The agent log shows the name it sends |

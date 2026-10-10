@@ -46,6 +46,10 @@ ssh root@db-01 /tmp/lg/install-agent.sh -s logs.example.net:5140 -n db-01
 | `--uninstall` | stop the service and remove the binary and unit |
 | `--purge` | with `--uninstall`, also remove `/etc/lastgasp` and the key |
 
+`LASTGASP_TOKEN` and `LASTGASP_KEY` can replace `--token` and `--key`. Values given as options show up in `ps` and in the shell history, so the environment is the better place for them. To keep the token out of the history too, read it at a prompt: `read -r LASTGASP_TOKEN && export LASTGASP_TOKEN`, then run the script. `sudo` drops most of the environment, so run the script from a root shell or with `sudo --preserve-env=LASTGASP_TOKEN`.
+
+A download is checked against the release checksums with `sha256sum`, `shasum` or `openssl`, the first one found. Without any of them the script stops.
+
 Without `-t`, `-k` or `--key-file`, an existing key is kept, or a new one is created and the line for the server key file is printed:
 
 ```text
@@ -88,13 +92,18 @@ ssh root@db-01 /tmp/lg/install-agent.sh --uninstall --purge   # removes the key 
 The install script runs this, which can also be used on its own:
 
 ```sh
-lastgasp-agent enroll -server logs.example.net:5140 -token lgj_3f9a... -key-file /etc/lastgasp/agent.key
+lastgasp-agent enroll -server logs.example.net:5140 -token-file /run/secrets/lastgasp-token -key-file /etc/lastgasp/agent.key
+LASTGASP_TOKEN=lgj_3f9a... lastgasp-agent enroll -server logs.example.net:5140 -if-missing
 ```
+
+A token given with `-token` shows up in `ps` and in the shell history, so `-token-file` or `LASTGASP_TOKEN` is the better choice. With `-if-missing` the command can run at every start, for example in a Kubernetes init container: it only enrolls when there is no valid key yet.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-server` | | server `host:port`, the first of a comma separated list is used (required) |
-| `-token` | | join token (required) |
+| `-token-file` | | file with the join token |
+| `-token` | | join token. Exactly one of `-token` and `-token-file` is needed, `LASTGASP_TOKEN` is used when neither is set |
+| `-if-missing` | false | exit without enrolling when the key file already holds a valid key |
 | `-hostname` | kernel hostname | name to enroll, must match the `-hostname` the agent runs with |
 | `-key-file` | /etc/lastgasp/agent.key | where to save the key |
 | `-timeout` | 30s | how long to wait for an answer |

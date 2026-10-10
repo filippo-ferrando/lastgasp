@@ -4,6 +4,10 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+Nothing
+
+## v0.1.5
+
 - The server retries the database for up to 30 seconds at start instead of exiting on the first refused connection. A new Kubernetes pod is often refused for a moment until network policies know its address.
 - The web UI offers join tokens valid for 1 year, as the API already allowed. Useful for a Kubernetes DaemonSet, where new nodes enroll with the same token.
 - Helm chart: with `agent.enroll` and no `key.extraLines` or `key.existingSecret`, the chart makes no key secret and the server runs without a key file. A key secret kept only for the server can be removed by dropping `key.existingSecret`.

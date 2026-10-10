@@ -2,7 +2,7 @@
 
 Changes that need an action on upgrade, newest first. The release workflow puts the section named like the tag (for example `## v0.2.0`), or `## Unreleased` when there is none, at the top of the release notes. Rename `Unreleased` to the tag when cutting the release.
 
-## Unreleased
+## v0.1.4
 
 Security changes in the agent and its install files:
 

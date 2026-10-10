@@ -40,6 +40,8 @@ grep -q "server key file" "$TMP/out" && fail "key line printed again"
 # A given key replaces the stored one.
 install -s a:1 -k 00112233445566778899aabbccddeeff || fail "install with key: $(cat "$TMP/out")"
 [ "$(cat "$ROOT/etc/lastgasp/agent.key")" = 00112233445566778899aabbccddeeff ] || fail "given key not stored"
+LASTGASP_KEY=ffeeddccbbaa99887766554433221100 install -s a:1 || fail "install with env key: $(cat "$TMP/out")"
+[ "$(cat "$ROOT/etc/lastgasp/agent.key")" = ffeeddccbbaa99887766554433221100 ] || fail "env key not stored"
 
 # Bad input is refused.
 install && fail "missing --server accepted"
@@ -67,7 +69,7 @@ if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
 	cat > "$TMP/fake-agent" <<'AGENT'
 #!/bin/sh
 if [ "${1:-}" = enroll ]; then
-	while [ $# -gt 0 ]; do [ "$1" = -key-file ] && echo cafe0000cafe0000cafe0000cafe0000 > "$2"; [ "$1" = -token ] && [ "$2" = bad ] && exit 1; shift; done
+	while [ $# -gt 0 ]; do [ "$1" = -key-file ] && echo cafe0000cafe0000cafe0000cafe0000 > "$2"; [ "${LASTGASP_TOKEN:-}" = bad ] && exit 1; shift; done
 	exit 0
 fi
 exit 0
@@ -92,6 +94,23 @@ AGENT
 	grep -q "server key file" "$TMP/out" && fail "key line printed after enrollment"
 	piped --repo "$repo" -V v9.9.9 -s logs:5140 -t bad && fail "failed enrollment accepted"
 	piped --repo "$repo" -s logs:5140 -t lgj_abc -k 00112233445566778899aabbccddeeff && fail "--token with --key accepted"
+	# The token can come from the environment, so it stays out of ps.
+	rm -rf "$ROOT"
+	(export LASTGASP_TOKEN=lgj_abc; piped --repo "$repo" -s logs:5140) || fail "token from env: $(cat "$TMP/out")"
+	[ "$(cat "$ROOT/etc/lastgasp/agent.key")" = cafe0000cafe0000cafe0000cafe0000 ] || fail "env token did not enroll"
+	(export LASTGASP_TOKEN=bad; piped --repo "$repo" -s logs:5140) && fail "bad env token accepted"
+	# Without any checksum tool the download is refused, not installed unchecked.
+	mkdir "$TMP/path"
+	for c in /usr/bin/* /bin/*; do
+		case ${c##*/} in sha256sum|shasum|openssl) continue ;; esac
+		[ -e "$TMP/path/${c##*/}" ] || ln -s "$c" "$TMP/path/${c##*/}"
+	done
+	(PATH="$TMP/path"; piped --repo "$repo" -V v9.9.9 -s logs:5140) && fail "download accepted without a checksum tool"
+	check "$TMP/out" "sha256sum, shasum or openssl is needed"
+	if command -v openssl >/dev/null 2>&1; then
+		ln -s "$(command -v openssl)" "$TMP/path/openssl"
+		(PATH="$TMP/path"; piped --repo "$repo" -V v9.9.9 -s logs:5140) || fail "openssl fallback: $(cat "$TMP/out")"
+	fi
 	# A changed download is refused.
 	echo tampered >> "$rel/lastgasp-agent-linux-$arch"
 	piped --repo "$repo" -V v9.9.9 -s logs:5140 && fail "tampered binary accepted"

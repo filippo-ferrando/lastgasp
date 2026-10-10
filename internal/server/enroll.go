@@ -100,6 +100,7 @@ type Enroller struct {
 	mu       sync.Mutex
 	recent   map[string]recentReply // host, agent key and proof, so a lost reply is sent again without a second use
 	limits   map[string]*ipLimit
+	global   ipLimit // budget shared by all addresses, as source addresses can be forged
 	now      func() time.Time
 	initOnce sync.Once
 }
@@ -127,7 +128,11 @@ const (
 	enrollBurst   = 5
 	enrollBadMax  = 10 // bad tokens per address in enrollBadSpan before it is ignored
 	enrollBadSpan = 10 * time.Minute
-	recentFor     = 10 * time.Minute
+	// A new agent enrolls once, so 20 per second still enrolls 1000 hosts in a minute.
+	enrollGlobalRate  = 20.0
+	enrollGlobalBurst = 40
+	enrollMaxAddrs    = 10000
+	recentFor         = 10 * time.Minute
 )
 
 func (e *Enroller) init() {
@@ -186,28 +191,46 @@ func addrIP(a net.Addr) string {
 	return host
 }
 
-// allow takes one request from the budget of ip, and refuses blocked addresses.
-func (e *Enroller) allow(ip string, now time.Time) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	l := e.limits[ip]
-	if l == nil {
-		if len(e.limits) > 10000 {
-			clear(e.limits)
-		}
-		l = &ipLimit{tokens: enrollBurst, last: now}
-		e.limits[ip] = l
-	}
-	if l.bad >= enrollBadMax && now.Sub(l.badFrom) < enrollBadSpan {
-		return false
-	}
-	l.tokens = min(enrollBurst, l.tokens+now.Sub(l.last).Seconds()*enrollRate)
+func (l *ipLimit) blocked(now time.Time) bool {
+	return l.bad >= enrollBadMax && now.Sub(l.badFrom) < enrollBadSpan
+}
+
+// take refills the budget for the time since the last call and takes one request from it.
+func (l *ipLimit) take(now time.Time, rate, burst float64) bool {
+	l.tokens = min(burst, l.tokens+now.Sub(l.last).Seconds()*rate)
 	l.last = now
 	if l.tokens < 1 {
 		return false
 	}
 	l.tokens--
 	return true
+}
+
+// allow takes one request from the budget of ip and from the shared budget, and refuses blocked addresses.
+// The address goes first, so one busy address cannot use up the shared budget alone.
+func (e *Enroller) allow(ip string, now time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	l := e.limits[ip]
+	if l == nil {
+		if len(e.limits) >= enrollMaxAddrs {
+			// Blocked addresses stay, so a spray of new addresses cannot lift their block.
+			for k, o := range e.limits {
+				if !o.blocked(now) {
+					delete(e.limits, k)
+				}
+			}
+		}
+		l = &ipLimit{tokens: enrollBurst, last: now}
+		e.limits[ip] = l
+	}
+	if l.blocked(now) || !l.take(now, enrollRate, enrollBurst) {
+		return false
+	}
+	if e.global.last.IsZero() {
+		e.global = ipLimit{tokens: enrollGlobalBurst, last: now}
+	}
+	return e.global.take(now, enrollGlobalRate, enrollGlobalBurst)
 }
 
 func (e *Enroller) badToken(ip string, now time.Time) {
@@ -277,10 +300,13 @@ func (e *Enroller) Handle(ctx context.Context, b []byte, from net.Addr) []byte {
 	if tokenID == 0 {
 		return badToken()
 	}
-	// Checked after the token, so only token holders learn which hosts are in the key file.
-	if e.Keys.File != nil && e.Keys.File.Current().Exact(req.Host) != nil {
+	// Checked after the token, so only token holders learn which hosts are taken. An enrolled host
+	// must be revoked first, so a token cannot take over its key.
+	inFile := e.Keys.File != nil && e.Keys.File.Current().Exact(req.Host) != nil
+	if inFile || e.Keys.Enrolled.Lookup(req.Host) != nil {
 		e.count("host_taken")
-		e.Log.Warn("enroll refused, the host has a line in the key file", "host", req.Host, "from", ip)
+		e.Log.Warn("enroll refused, the host has a line in the key file or is enrolled", "host", req.Host, "from", ip,
+			"key_file", inFile)
 		return wire.EncodeEnrollReply(&wire.EnrollReply{Status: wire.EnrollHostTaken})
 	}
 	agentPub, err := ecdh.X25519().NewPublicKey(req.Pub[:])

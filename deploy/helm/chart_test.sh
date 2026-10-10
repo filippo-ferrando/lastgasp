@@ -70,6 +70,27 @@ has "$TMP/agentonly" "- -server=logs.example.net:5140"
 has "$TMP/agentonly" "dnsPolicy: ClusterFirstWithHostNet"
 hasnot "$TMP/agentonly" "kind: Deployment"
 
+# Enrollment: each agent gets its own key in an init container, and the server key file has no "*" line.
+render enroll --set agent.enroll.tokenSecret.name=join --set key.extraLines='other  '"$(printf '%064d' 0)"
+e="$TMP/enroll"
+for s in "initContainers:" "- enroll" "- -token-file=/etc/lastgasp-join/token" "- -if-missing" "secretName: join" \
+	"path: /var/lib/lastgasp" "- -key-file=/var/lib/lastgasp/agent.key"; do
+	has "$e" "$s"
+done
+hasnot "$e" "- -key-file=/etc/lastgasp/agent.key"
+sed -n 's/^  keys: //p' "$e" | base64 -d | grep -q '^\*' && fail "enroll: server key file still has a '*' line"
+hasnot "$d" "initContainers:"
+
+# A device plugin gives /dev/kmsg, so the host path is left out. Images can be pinned by digest.
+dig=sha256:$(printf '%064d' 1)
+render nokmsg --set agent.kmsgHostPath=false --set agent.podSecurityContext.seLinuxOptions.type=spc_t --set agent.image.digest=$dig --set server.image.digest=$dig
+hasnot "$TMP/nokmsg" "path: /dev/kmsg"
+has "$TMP/nokmsg" "type: spc_t"
+has "$TMP/nokmsg" "lastgasp-agent@$dig"
+has "$TMP/nokmsg" "lastgasp-server@$dig"
+has "$d" "readOnly: true"
+has "$d" "automountServiceAccountToken: false"
+
 refuse "server.replicas must be 0 or 1" --set server.replicas=2
 refuse "agent.server is required" --set server.enabled=false
 refuse "metrics.requireAuth needs server.auth.existingSecret" --set metrics.enabled=true --set metrics.requireAuth=true
@@ -88,6 +109,11 @@ for part in server agent; do
 	for flag in $(sed -n 's/^[[:space:]]*- -\([a-z][a-z-]*\).*/\1/p' "$TMP/$part.yaml" | sort -u); do
 		grep -Eq "^  -$flag( |$)" "$TMP/$part.help" || fail "unknown $part flag -$flag"
 	done
+done
+# The flags of the enroll init container must exist in "lastgasp-agent enroll".
+"$TMP/agent" enroll -h 2>"$TMP/enroll.help" || true
+for flag in $(sed -n '/name: enroll/,/env:/s/^[[:space:]]*- -\([a-z][a-z-]*\).*/\1/p' "$e" | sort -u); do
+	grep -Eq "^  -$flag( |$)" "$TMP/enroll.help" || fail "unknown enroll flag -$flag"
 done
 has "$TMP/server.yaml" "- -auth-metrics"
 has "$TMP/server.yaml" "- -rules=/etc/lastgasp/rules/rules"

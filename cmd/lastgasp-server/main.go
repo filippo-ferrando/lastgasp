@@ -77,6 +77,7 @@ func main() {
 		os.Exit(command(flag.Args()))
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(log)
 	fail := func(msg string, err error) {
 		log.Error(msg, "err", err)
 		os.Exit(1)

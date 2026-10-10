@@ -171,6 +171,20 @@ func (s *Stash) recover(boot [16]byte) ([]Item, error) {
 	return out, nil
 }
 
+// dropOversized removes recovered items with a message over max bytes, which the wire encoder would
+// refuse forever and so block the queue.
+func dropOversized(items []Item, max int, log *Logger) []Item {
+	out := items[:0]
+	for _, it := range items {
+		if len(it.Rec.Msg) > max {
+			log.Printf("stash: dropped a record of %d bytes, the limit is %d", len(it.Rec.Msg), max)
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
 // Close unmaps the stash. The file stays, so the next run can read it.
 func (s *Stash) Close() error {
 	if s == nil || s.close == nil {

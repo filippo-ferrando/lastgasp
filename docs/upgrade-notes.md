@@ -4,6 +4,13 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+Security changes in the agent and its install files:
+
+- `install-agent.sh` stops when no `sha256sum`, `shasum` or `openssl` is found, instead of installing an unchecked download. It reads `LASTGASP_TOKEN` and `LASTGASP_KEY`, which keep the secret out of `ps`.
+- `lastgasp-agent enroll` takes `-token-file`, `LASTGASP_TOKEN` and `-if-missing`.
+- The agent unit is sandboxed: the system is read-only apart from `/run/lastgasp`. An agent started with `-stash` elsewhere needs a drop-in with `ReadWritePaths=` for that directory.
+- The agent refuses a stash path that is a symlink or not a regular file. A stash file bigger than `-stash-size` is not read, so lowering `-stash-size` drops the records kept across that restart.
+
 Packet version 5 adds forward secrecy: agent and server agree on new keys with a Noise handshake every 2 minutes, so a key stolen later cannot open traffic recorded before. See [forward-secrecy.md](forward-secrecy.md).
 
 **Upgrade the servers before the agents.** A new agent sends version 5 by default, and a server older than this release never answers it. The agent then holds its records and logs `waiting for a server to answer a handshake`. Nothing is lost while it waits, as long as the buffer holds, but nothing arrives either.
@@ -25,3 +32,17 @@ Also new in this release:
 - Metrics `lastgasp_handshakes_total`, `lastgasp_sessions` and `lastgasp_agent_wire_version`, and the reasons `unknown_session` and `replay` in `lastgasp_packets_invalid_total`. A few `unknown_session` right after a server restart are normal.
 - A `replay` server incident and a `LastgaspReplayedPackets` Prometheus rule, for many version 5 packets seen twice.
 - The longest message per packet is 5 bytes shorter, so very long kernel lines are split a little earlier.
+- Web UI sessions are tied to the password of the user, so a changed password ends old sessions after a reload. Sessions made before this release end once, and users log in again.
+- `/readyz` no longer puts the reason in its 503 answer, as it needs no login. The reason is logged by the server.
+- An address blocked after failed logins only stops password and token checks. Requests with a valid session cookie still work.
+
+Enrollment changes:
+
+- `POST /api/enroll-tokens` without `uses` now makes a token for 1 agent, not one with no limit. Scripts that need a token for many agents send `"uses": 0` (no limit) or a number.
+- A host that is enrolled already cannot enroll again, so a join token can no longer replace the key of another host. To enroll a reinstalled host again, revoke its key in the Agents table first. The agent then logs that the host is taken.
+
+Helm chart changes:
+
+- `agent.enroll.tokenSecret` gives each node its own key through an enroll init container, and drops the `*` line from the generated server key file. See [kubernetes.md](kubernetes.md#keys).
+- `agent.kmsgHostPath`, `agent.podSecurityContext` and `image.digest` allow a non privileged agent with a device plugin, and images pinned by digest.
+- `/dev/kmsg` is mounted read only, and the server pod gets no service account token.

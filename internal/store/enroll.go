@@ -98,11 +98,9 @@ func (s *Store) RevokeEnrollToken(ctx context.Context, id int64) error {
 	return s.updateOne(ctx, `UPDATE enroll_tokens SET revoked = 1 WHERE id = ?`, id)
 }
 
-// SaveAgentKey stores the key of an enrolled agent, replacing an older key of the same host.
+// SaveAgentKey stores the key of an enrolled agent. It fails when the host has a key already.
 func (s *Store) SaveAgentKey(ctx context.Context, k *AgentKey) error {
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO agent_keys (host, key_hex, token_id, from_addr, enrolled_at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (host) DO UPDATE SET key_hex = excluded.key_hex, token_id = excluded.token_id,
-		from_addr = excluded.from_addr, enrolled_at = excluded.enrolled_at`),
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO agent_keys (host, key_hex, token_id, from_addr, enrolled_at) VALUES (?, ?, ?, ?, ?)`),
 		k.Host, k.Key, k.TokenID, k.From, ms(k.EnrolledAt))
 	return err
 }

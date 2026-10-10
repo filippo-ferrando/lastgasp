@@ -590,11 +590,15 @@ func TestEnrollTokensAndKeys(t *testing.T) {
 			}
 
 			k := &AgentKey{Host: "db-01", Key: "aa", TokenID: once.ID, From: "10.0.0.7", EnrolledAt: now}
-			s.SaveAgentKey(ctx, k)
-			k.Key = "bb" // enrolling again replaces the key
-			s.SaveAgentKey(ctx, k)
+			if err := s.SaveAgentKey(ctx, k); err != nil {
+				t.Fatal(err)
+			}
+			k.Key = "bb" // enrolling again must not replace the key
+			if err := s.SaveAgentKey(ctx, k); err == nil {
+				t.Fatal("second key saved")
+			}
 			keys, err := s.AgentKeys(ctx)
-			if err != nil || len(keys) != 1 || keys[0].Key != "bb" || keys[0].From != "10.0.0.7" {
+			if err != nil || len(keys) != 1 || keys[0].Key != "aa" || keys[0].From != "10.0.0.7" {
 				t.Fatalf("keys %+v %v", keys, err)
 			}
 			if err := s.DeleteAgentKey(ctx, "db-01"); err != nil {

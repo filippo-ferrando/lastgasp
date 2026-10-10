@@ -326,9 +326,10 @@ func TestSessionLoginAndLogout(t *testing.T) {
 		t.Fatalf("after logout: %d", r.StatusCode)
 	}
 
-	// Removing a user from the auth file ends its sessions.
+	// Removing a user from the auth file ends its sessions, other sessions stay.
 	r = do("POST", "/api/login", `{"user":"bob","password":"b-pass"}`, nil)
 	cookie = r.Cookies()[0]
+	aliceCookie := do("POST", "/api/login", `{"user":"alice","password":"a-pass"}`, nil).Cookies()[0]
 	os.WriteFile(path, []byte(alice+"\n"), 0o600)
 	if err := auth.Reload(); err != nil {
 		t.Fatal(err)
@@ -336,12 +337,36 @@ func TestSessionLoginAndLogout(t *testing.T) {
 	if r := do("GET", "/api/logs", "", cookie); r.StatusCode != 401 {
 		t.Fatalf("removed user: %d", r.StatusCode)
 	}
+	if r := do("GET", "/api/logs", "", aliceCookie); r.StatusCode != 200 {
+		t.Fatalf("unchanged user after reload: %d", r.StatusCode)
+	}
+	// A new password ends the sessions made with the old one.
+	alice2, _ := HashPassword("alice", RoleAdmin, "a-new")
+	os.WriteFile(path, []byte(alice2+"\n"), 0o600)
+	if err := auth.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if r := do("GET", "/api/logs", "", aliceCookie); r.StatusCode != 401 {
+		t.Fatalf("session after password change: %d", r.StatusCode)
+	}
+	aliceCookie = do("POST", "/api/login", `{"user":"alice","password":"a-new"}`, nil).Cookies()[0]
 	// Login failures count against the same limit as basic auth.
 	for range maxFails {
 		do("POST", "/api/login", `{"user":"alice","password":"wrong"}`, nil)
 	}
-	if r := do("POST", "/api/login", `{"user":"alice","password":"a-pass"}`, nil); r.StatusCode != 429 {
+	if r := do("POST", "/api/login", `{"user":"alice","password":"a-new"}`, nil); r.StatusCode != 429 {
 		t.Fatalf("after failures: %d", r.StatusCode)
+	}
+	// The block of the address stops password checks, not users who already have a session.
+	if r := do("GET", "/api/logs", "", aliceCookie); r.StatusCode != 200 {
+		t.Fatalf("session from a blocked address: %d", r.StatusCode)
+	}
+	req, _ := http.NewRequest("GET", srv.URL+"/api/logs", nil)
+	req.SetBasicAuth("alice", "a-new")
+	if r, err := http.DefaultClient.Do(req); err != nil || r.StatusCode != 429 {
+		t.Fatalf("basic auth from a blocked address: %v %v", r, err)
+	} else {
+		r.Body.Close()
 	}
 }
 
@@ -355,5 +380,13 @@ func TestSessionStoreExpiry(t *testing.T) {
 	}
 	if _, err := e.st.SessionUser(ctx, "h1", now.Add(2*time.Minute)); err == nil {
 		t.Fatal("expired session accepted")
+	}
+}
+
+// The page has no JS test setup, so this only checks that next is parsed and held to this origin.
+func TestLoginPageNextStaysOnThisServer(t *testing.T) {
+	b, _ := uiFS.ReadFile("ui/login.html")
+	if !strings.Contains(string(b), "new URL(") || !strings.Contains(string(b), "u.origin === location.origin") {
+		t.Fatal("login page does not check the origin of next")
 	}
 }

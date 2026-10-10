@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"lastgasp/internal/wire"
@@ -73,7 +74,8 @@ func finishEnroll(priv *ecdh.PrivateKey, rep wire.EnrollReply, th [32]byte, host
 	case wire.EnrollBadToken:
 		return nil, errors.New("the server refused the token: wrong, expired, revoked or used up")
 	case wire.EnrollHostTaken:
-		return nil, fmt.Errorf("the server key file has its own line for %s, use that key or remove the line", host)
+		return nil, fmt.Errorf("%s is taken: it has its own line in the server key file, or is enrolled already "+
+			"(revoke it in the web UI first)", host)
 	default:
 		return nil, fmt.Errorf("the server refused the enrollment (status %d)", rep.Status)
 	}
@@ -105,4 +107,35 @@ func WriteKeyFile(path string, key []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// EnrollToken picks the join token from the -token value or the -token-file file, exactly one of them.
+// With neither set, it reads LASTGASP_TOKEN, so the token can stay off the command line.
+func EnrollToken(token, tokenFile string) (string, error) {
+	switch {
+	case token != "" && tokenFile != "":
+		return "", errors.New("use only one of -token and -token-file")
+	case tokenFile != "":
+		b, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", err
+		}
+		token = string(b)
+	case token == "":
+		token = os.Getenv("LASTGASP_TOKEN")
+	}
+	if token = strings.TrimSpace(token); token == "" {
+		return "", errors.New("a join token is required: use -token, -token-file or LASTGASP_TOKEN")
+	}
+	return token, nil
+}
+
+// HasKey reports whether path holds a valid key.
+func HasKey(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_, err = wire.ParseKey(string(b))
+	return err == nil
 }

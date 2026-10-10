@@ -85,6 +85,8 @@ The server keeps these sessions per agent run, in memory only:
 
 A pending session becomes current with its first valid data packet, as in WireGuard, and older pending ones are dropped. A replayed handshake can only make a pending session that never carries data, it never replaces a working one.
 
+The server keeps at most 16 agent runs per host and 100000 in total. When full, it drops runs without a current session first, then the run with the oldest session, so handshakes for made up runs cannot push out working sessions of other hosts.
+
 Each data packet passes a replay window of 4096 counters after it is decrypted. Older or repeated counters are dropped and counted as `replay`. Records sent again by the agent use a new counter, so resends still pass.
 
 ### Timers

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"slices"
@@ -83,12 +84,16 @@ func (a *API) Handler() http.Handler {
 	return secure(mux)
 }
 
+// csp limits the UI to its own server. The pages have inline script and style, so those stay allowed.
+const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; " +
+	"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
 // secure adds headers that stop other sites from framing the UI, for example to click "acknowledge".
 func secure(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hd := w.Header()
 		hd.Set("X-Frame-Options", "DENY")
-		hd.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		hd.Set("Content-Security-Policy", csp)
 		hd.Set("X-Content-Type-Options", "nosniff")
 		hd.Set("Referrer-Policy", "no-referrer")
 		h.ServeHTTP(w, r)
@@ -267,13 +272,15 @@ func (a *API) loginPage(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-// readyz answers 200 when the database and the packet path work, 503 with the reason otherwise.
+// readyz answers 200 when the database and the packet path work, 503 otherwise. The reason goes
+// to the log only, as /readyz needs no login and database errors can name hosts and users.
 func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
 	if a.Ready != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if err := a.Ready(ctx); err != nil {
-			http.Error(w, "not ready: "+err.Error(), http.StatusServiceUnavailable)
+			slog.Warn("not ready", "err", err)
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 	}

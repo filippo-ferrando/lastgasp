@@ -970,7 +970,7 @@ func TestReadyz(t *testing.T) {
 	dbDown := false
 	api := &API{Store: e.st, Tracker: e.tr, Gatherer: e.reg, Ready: func(ctx context.Context) error {
 		if dbDown {
-			return errors.New("database: closed")
+			return errors.New("database: dial tcp db.internal:5432: password authentication failed for user lastgasp")
 		}
 		return e.in.Ready()
 	}}
@@ -985,7 +985,7 @@ func TestReadyz(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	if code, body := status(); code != 503 || !strings.Contains(body, "not reading UDP") {
+	if code, body := status(); code != 503 || body != "not ready\n" {
 		t.Fatalf("before listen: %d %s", code, body)
 	}
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -1000,8 +1000,22 @@ func TestReadyz(t *testing.T) {
 		t.Fatalf("ready: %d %s", code, body)
 	}
 	dbDown = true
-	if code, body := status(); code != 503 || !strings.Contains(body, "database") {
+	if code, body := status(); code != 503 || body != "not ready\n" {
 		t.Fatalf("db down: %d %s", code, body)
 	}
 	conn.Close()
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	w := httptest.NewRecorder()
+	secure(http.NotFoundHandler()).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	got := w.Header().Get("Content-Security-Policy")
+	for _, want := range []string{"default-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("csp %q lacks %q", got, want)
+		}
+	}
+	if w.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatal("framing allowed")
+	}
 }

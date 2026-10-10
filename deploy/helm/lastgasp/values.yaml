@@ -7,6 +7,7 @@ imagePullSecrets: []
 clusterDomain: cluster.local
 
 # Shared agent key. Every agent uses it, and the server accepts it for every host (a "*" line).
+# Not used by agents when agent.enroll is set: then the server key file only holds key.extraLines.
 key:
   # Secret with "agent.key" (64 hex characters) and "keys" (the server key file, with a "* <key>" line).
   # Empty: the chart creates one with a random key and keeps it on upgrades.
@@ -22,6 +23,8 @@ server:
     repository: git.fferrando.cc/rdfilippo/lastgasp-server
     # Default: the chart appVersion.
     tag: ""
+    # Like "sha256:...". When set, the image is pulled by digest and the tag is ignored.
+    digest: ""
     pullPolicy: IfNotPresent
 
   # Delete data older than this, "0" keeps everything. See docs/server.md for the other limits.
@@ -121,6 +124,7 @@ agent:
   image:
     repository: git.fferrando.cc/rdfilippo/lastgasp-agent
     tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
 
   # Comma separated host:port list. Empty: the UDP service of this release.
@@ -134,10 +138,22 @@ agent:
   # Send version 5 packets with a handshake per server, see docs/forward-secrecy.md. Turn off only
   # while the server is older than version 5.
   forwardSecrecy: true
+  # Give each agent its own key: an init container enrolls once with a join token from the web UI
+  # and keeps the key in keyDir on the node. One node then cannot send as another. See docs/kubernetes.md.
+  enroll:
+    tokenSecret:
+      name: ""
+      key: token
+    keyDir: /var/lib/lastgasp
+  # Mount /dev/kmsg from the node. Turn off when a device plugin adds the device, see docs/kubernetes.md.
+  kmsgHostPath: true
   # More agent flags, like ["-buffer=32768", "-rate=1000"].
   extraArgs: []
   env: []
 
+  # Pod level settings, also used by the enroll init container. With SELinux, a non privileged agent
+  # needs seLinuxOptions.type spc_t to read /dev/kmsg and pstore, see docs/kubernetes.md.
+  podSecurityContext: {}
   # Opening /dev/kmsg needs a privileged container: the device is not allowed otherwise.
   securityContext:
     privileged: true

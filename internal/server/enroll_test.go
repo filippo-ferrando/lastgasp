@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +177,107 @@ func TestEnrollerRetryAndLimits(t *testing.T) {
 	}
 	if answered != enrollBurst {
 		t.Fatalf("%d of a burst answered", answered)
+	}
+}
+
+func TestEnrollerRefusesEnrolledHost(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	tok := &store.EnrollToken{UsesLeft: 5, ExpiresAt: now.Add(time.Hour)}
+	st.CreateEnrollToken(ctx, tok, tokenHash("lgj_many"))
+	keys := &Keys{Enrolled: NewEnrolledKeys()}
+	en := &Enroller{Store: st, Keys: keys, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	en.now = func() time.Time { return now }
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 999}
+	try := func(pub byte) wire.EnrollReply {
+		now = now.Add(time.Second)
+		req := &wire.EnrollRequest{Host: "h", Pub: [32]byte{pub}}
+		req.Proof = wire.EnrollProof(wire.TokenHash("lgj_many"), "h", req.Pub)
+		b, _ := wire.EncodeEnrollRequest(req)
+		rep, err := wire.DecodeEnrollReply(en.Handle(ctx, b, from))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	if rep := try(9); rep.Status != wire.EnrollOK {
+		t.Fatalf("first: %+v", rep)
+	}
+	key := string(keys.Enrolled.Lookup("h"))
+	// Another key pair with a valid token cannot take over the host.
+	if rep := try(7); rep.Status != wire.EnrollHostTaken {
+		t.Fatalf("takeover: %+v", rep)
+	}
+	saved, _ := st.AgentKeys(ctx)
+	if string(keys.Enrolled.Lookup("h")) != key || len(saved) != 1 || saved[0].Key != hex.EncodeToString([]byte(key)) {
+		t.Fatal("key replaced")
+	}
+	// A retry of the first request still gets its OK, without a second use.
+	if rep := try(9); rep.Status != wire.EnrollOK {
+		t.Fatalf("retry: %+v", rep)
+	}
+	if l, _ := st.EnrollTokens(ctx); l[0].Used != 1 {
+		t.Fatalf("token used %d times", l[0].Used)
+	}
+	// Once revoked, the host enrolls again.
+	st.DeleteAgentKey(ctx, "h")
+	keys.Enrolled.Delete("h")
+	if rep := try(5); rep.Status != wire.EnrollOK || string(keys.Enrolled.Lookup("h")) == key {
+		t.Fatalf("after revoke: %+v", rep)
+	}
+}
+
+func TestCreateEnrollTokenUses(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer((&API{Store: st, Tracker: NewTracker(), Gatherer: prometheus.NewRegistry()}).Handler())
+	defer srv.Close()
+	for body, want := range map[string]int{`{}`: 1, `{"uses":0}`: -1, `{"uses":3}`: 3, `{"uses":-1}`: 0} {
+		resp, err := http.Post(srv.URL+"/api/enroll-tokens", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var created struct{ Info store.EnrollToken }
+		json.NewDecoder(resp.Body).Decode(&created)
+		resp.Body.Close()
+		if want == 0 && resp.StatusCode != 400 || want != 0 && (resp.StatusCode != 201 || created.Info.UsesLeft != want) {
+			t.Errorf("%s: %d %+v", body, resp.StatusCode, created.Info)
+		}
+	}
+}
+
+func TestEnrollerSharedLimit(t *testing.T) {
+	en := &Enroller{}
+	en.init()
+	now := time.Now()
+	// Requests from many addresses, as a spray with forged sources, share one budget.
+	allowed := 0
+	for i := range 200 {
+		if en.allow(net.IPv4(10, 1, byte(i>>8), byte(i)).String(), now) {
+			allowed++
+		}
+	}
+	if allowed != enrollGlobalBurst {
+		t.Fatalf("%d of a spray allowed", allowed)
+	}
+	// A full table drops addresses that are not blocked, and keeps the blocked one.
+	en.limits["10.9.9.9"] = &ipLimit{bad: enrollBadMax, badFrom: now}
+	for i := len(en.limits); i < enrollMaxAddrs; i++ {
+		en.limits[strconv.Itoa(i)] = &ipLimit{}
+	}
+	now = now.Add(time.Minute)
+	if !en.allow("10.2.2.2", now) || len(en.limits) != 2 {
+		t.Fatalf("after eviction: %d addresses", len(en.limits))
+	}
+	if en.allow("10.9.9.9", now) {
+		t.Fatal("blocked address allowed after eviction")
 	}
 }

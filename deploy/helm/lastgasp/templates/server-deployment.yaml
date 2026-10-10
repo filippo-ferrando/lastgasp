@@ -55,7 +55,9 @@ spec:
             {{- else }}
             - -db=/var/lib/lastgasp/lastgasp.db
             {{- end }}
+            {{- if include "lastgasp.keyFile" . }}
             - -key-file=/etc/lastgasp/key/keys
+            {{- end }}
             {{- with $s.retain }}
             - -retain={{ . }}
             {{- end }}
@@ -121,9 +123,11 @@ spec:
               mountPath: /var/lib/lastgasp
             - name: tmp
               mountPath: /tmp
+            {{- if include "lastgasp.keyFile" . }}
             - name: key
               mountPath: /etc/lastgasp/key
               readOnly: true
+            {{- end }}
             {{- if $s.auth.existingSecret }}
             - name: auth
               mountPath: /etc/lastgasp/auth
@@ -147,6 +151,7 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if include "lastgasp.keyFile" . }}
         - name: key
           secret:
             secretName: {{ include "lastgasp.keySecretName" . }}
@@ -154,6 +159,7 @@ spec:
               - key: keys
                 path: keys
             defaultMode: 0440
+        {{- end }}
         {{- if $s.auth.existingSecret }}
         - name: auth
           secret:

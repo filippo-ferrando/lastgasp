@@ -142,6 +142,10 @@ func (a *API) streams(w http.ResponseWriter, r *http.Request) {
 	out := []Stream{}
 	for _, s := range a.Tracker.Snapshot() {
 		if (host == "" || s.Host == host) && (all || s.Missing() > 0) {
+			// Gaps older than the agent buffer keep their count but lose their ranges.
+			if s.MissingSet == nil {
+				s.MissingSet = []Range{}
+			}
 			out = append(out, s)
 		}
 	}

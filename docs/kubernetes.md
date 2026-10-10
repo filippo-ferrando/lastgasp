@@ -19,7 +19,7 @@ Open `http://127.0.0.1:8080`: every node shows up under its node name with its b
 | Deployment `<release>-server` | the server, 0 or 1 replica, `Recreate` updates |
 | Service `<release>-udp` | agent packets, UDP 5140 |
 | Service `<release>-http` | web UI, API and `/metrics`, TCP 8080 |
-| Secret `<release>-key` | the shared agent key and the server key file (without the `*` line when agents enroll) |
+| Secret `<release>-key` | the shared agent key and the server key file. Left out when agents enroll and `key.extraLines` is empty: the server then runs without a key file |
 | PersistentVolumeClaim `<release>-data` | the SQLite database. Kept on `helm uninstall` |
 | Ingress, ServiceMonitor, PrometheusRule, ConfigMap | only when turned on |
 
@@ -41,7 +41,7 @@ kubectl -n lastgasp create secret generic lastgasp-join --from-literal=token=lgj
 helm upgrade lastgasp oci://git.fferrando.cc/rdfilippo/lastgasp -n lastgasp --reuse-values --set agent.enroll.tokenSecret.name=lastgasp-join
 ```
 
-An init container then enrolls each node once and keeps its key in `agent.enroll.keyDir` (`/var/lib/lastgasp`) on the node, and the server key file loses its `*` line. A node holding the token can only enroll names that are not enrolled yet, so it cannot take over another node. After a node is reinstalled, its old key is gone: revoke the node in the web UI, and the agent pod enrolls again on its next restart.
+An init container then enrolls each node once and keeps its key in `agent.enroll.keyDir` (`/var/lib/lastgasp`) on the node, and the server key file loses its `*` line. Without `key.extraLines` and `key.existingSecret`, no key secret is made at all. A node holding the token can only enroll names that are not enrolled yet, so it cannot take over another node. After a node is reinstalled, its old key is gone: revoke the node in the web UI, and the agent pod enrolls again on its next restart.
 
 Machines outside the cluster can use their own keys: add `host hexkey` lines with `key.extraLines`, or enroll them with a join token from the UI as usual. For that, expose the UDP service (`server.service.udp.type: LoadBalancer` or `NodePort`) and set `server.agentAddress` to the address they reach.
 
@@ -59,7 +59,7 @@ Machines outside the cluster can use their own keys: add `host hexkey` lines wit
 
 ### Without a privileged container
 
-A privileged agent is root on every node. A device plugin can give the container `/dev/kmsg` instead, like [generic-device-plugin](https://github.com/squat/generic-device-plugin) started with `--device '{"name": "kmsg", "groups": [{"paths": [{"path": "/dev/kmsg"}]}]}'`, which adds the `squat.ai/kmsg` resource. The agent then needs only three capabilities: `SYSLOG` to read the log, `IPC_LOCK` to lock its memory and `SYS_RESOURCE` for its memory lock limit and OOM score.
+A privileged agent is root on every node. A device plugin can give the container `/dev/kmsg` instead, like [generic-device-plugin](https://github.com/squat/generic-device-plugin) started with `--device '{"name": "kmsg", "groups": [{"paths": [{"path": "/dev/kmsg"}]}]}'`, which adds the `devic.es/kmsg` resource (the name follows its `--domain` flag). The agent then needs only three capabilities: `SYSLOG` to read the log, `IPC_LOCK` to lock its memory and `SYS_RESOURCE` for its memory lock limit and OOM score.
 
 ```yaml
 agent:
@@ -85,7 +85,7 @@ agent:
       memory: 96Mi
     limits:
       memory: 128Mi
-      squat.ai/kmsg: 1
+      devic.es/kmsg: 1
 ```
 
 On nodes without SELinux, leave `podSecurityContext` out or keep it: the runtime ignores the SELinux type there, so one set of values fits a mixed cluster. `spc_t` turns off SELinux checks for the agent only. The capability, seccomp and device limits still apply. A policy module made with udica can replace it when stricter rules are needed.

@@ -1019,3 +1019,22 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Fatal("framing allowed")
 	}
 }
+
+// Gaps whose ranges were forgotten still list the stream, with an empty range list and not null.
+func TestStreamsForgottenRangesAreEmptyList(t *testing.T) {
+	tr := NewTracker()
+	now := time.Now()
+	tr.Observe(pkt("h", 1, 1, 1), now)
+	tr.Observe(pkt("h", 1, 1, 5), now)
+	p := pkt("h", 1, 1, 6)
+	p.Oldest = 6
+	tr.Observe(p, now)
+	if s := tr.Snapshot()[0]; s.Missing() == 0 || s.MissingSet != nil {
+		t.Fatalf("setup: stream %+v", s)
+	}
+	rec := httptest.NewRecorder()
+	(&API{Tracker: tr}).streams(rec, httptest.NewRequest("GET", "/api/streams", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `"missing_ranges":[]`) {
+		t.Fatalf("body %s", body)
+	}
+}

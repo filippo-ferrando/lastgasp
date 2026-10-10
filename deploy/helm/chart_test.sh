@@ -90,13 +90,10 @@ has "$TMP/enrollonly" "- -key-file=/var/lib/lastgasp/agent.key"
 render enrollexisting --set agent.enroll.tokenSecret.name=join --set key.existingSecret=mykey
 has "$TMP/enrollexisting" "- -key-file=/etc/lastgasp/key/keys"
 
-# A device plugin gives /dev/kmsg, so the host path is left out. Images can be pinned by digest.
-dig=sha256:$(printf '%064d' 1)
-render nokmsg --set agent.kmsgHostPath=false --set agent.podSecurityContext.seLinuxOptions.type=spc_t --set agent.image.digest=$dig --set server.image.digest=$dig
+# A device plugin gives /dev/kmsg, so the host path is left out.
+render nokmsg --set agent.kmsgHostPath=false --set agent.podSecurityContext.seLinuxOptions.type=spc_t
 hasnot "$TMP/nokmsg" "path: /dev/kmsg"
 has "$TMP/nokmsg" "type: spc_t"
-has "$TMP/nokmsg" "lastgasp-agent@$dig"
-has "$TMP/nokmsg" "lastgasp-server@$dig"
 has "$d" "readOnly: true"
 has "$d" "automountServiceAccountToken: false"
 

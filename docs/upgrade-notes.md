@@ -4,7 +4,7 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
-Nothing
+- Helm chart: the `image.digest` values are removed. Images are pulled by tag, the chart appVersion by default.
 
 ## v0.1.5
 

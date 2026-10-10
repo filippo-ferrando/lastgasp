@@ -23,8 +23,6 @@ server:
     repository: git.fferrando.cc/rdfilippo/lastgasp-server
     # Default: the chart appVersion.
     tag: ""
-    # Like "sha256:...". When set, the image is pulled by digest and the tag is ignored.
-    digest: ""
     pullPolicy: IfNotPresent
 
   # Delete data older than this, "0" keeps everything. See docs/server.md for the other limits.
@@ -124,7 +122,6 @@ agent:
   image:
     repository: git.fferrando.cc/rdfilippo/lastgasp-agent
     tag: ""
-    digest: ""
     pullPolicy: IfNotPresent
 
   # Comma separated host:port list. Empty: the UDP service of this release.

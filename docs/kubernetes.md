@@ -90,8 +90,6 @@ agent:
 
 On nodes without SELinux, leave `podSecurityContext` out or keep it: the runtime ignores the SELinux type there, so one set of values fits a mixed cluster. `spc_t` turns off SELinux checks for the agent only. The capability, seccomp and device limits still apply. A policy module made with udica can replace it when stricter rules are needed.
 
-Images can be pinned with `server.image.digest` and `agent.image.digest` (`sha256:...`), which win over the tag.
-
 The agent sends to `<release>-udp.<namespace>.svc.cluster.local.:5140`. It looks the address up once and keeps it when DNS fails later, so a broken cluster DNS does not stop it.
 
 `agent.hostNetwork: true` sends from the node network instead of the pod network, so a broken CNI on a dying node does not cut the agent off. The service address still needs kube-proxy, so pair it with `agent.server` set to an address the node reaches directly, like a LoadBalancer IP.

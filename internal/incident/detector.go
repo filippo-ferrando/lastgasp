@@ -24,12 +24,14 @@ const (
 	KindKernelError = "kernel_error"
 	// KindServer is a problem of the lastgasp server itself, like database errors.
 	KindServer = "server"
+	// KindFlapping is a host that keeps rebooting or going silent. It holds back the alerts of those.
+	KindFlapping = "flapping"
 )
 
 // ServerHost is the host name of server incidents. Agent hosts should not use it.
 const ServerHost = "@server"
 
-var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError, KindServer}
+var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError, KindServer, KindFlapping}
 
 // Kinds lists every incident kind.
 func Kinds() []string { return slices.Clone(kinds) }
@@ -43,6 +45,9 @@ type Config struct {
 	ResolveAfter time.Duration
 	// ServerQuiet closes a server incident as resolved after this long without a new problem, default 5 minutes.
 	ServerQuiet time.Duration
+	// FlapCount reboots or returns from silence within FlapWindow open a flapping incident. 0 turns it off.
+	FlapCount  int
+	FlapWindow time.Duration
 }
 
 // Metrics are the incident Prometheus metrics.
@@ -100,6 +105,8 @@ type Detector struct {
 	dirty map[int64]*store.Incident
 	// hits holds recent matches of rules with a count, per open key, until the count is reached.
 	hits map[string]*ruleHits
+	// flaps holds the times of recent reboots and returns from silence per host, oldest first.
+	flaps map[string][]time.Time
 	// lastReboot is the newest reboot per host that was not found to be a crash. pstore lines
 	// that arrive after the crash check can still turn it into one.
 	lastReboot map[string]*store.Incident
@@ -116,7 +123,7 @@ func NewDetector(st *store.Store, rules *Rules, cfg Config, m *Metrics, log *slo
 	}
 	d := &Detector{Store: st, Log: log, Metrics: m, Wake: func() {}, cfg: cfg,
 		hosts: map[string]*hostState{}, open: map[string]*store.Incident{}, dirty: map[int64]*store.Incident{},
-		hits: map[string]*ruleHits{}, lastReboot: map[string]*store.Incident{}}
+		hits: map[string]*ruleHits{}, flaps: map[string][]time.Time{}, lastReboot: map[string]*store.Incident{}}
 	d.SetRules(rules)
 	return d
 }
@@ -158,7 +165,13 @@ func openKey(host, boot, kind, rule string) string {
 	return host + "|" + boot + "|" + kind + "|" + rule
 }
 
-func keyOf(i *store.Incident) string { return openKey(i.Host, i.BootID, i.Kind, i.Rule) }
+// keyOf returns the open key of i. A flapping incident spans boots, so its key has none.
+func keyOf(i *store.Incident) string {
+	if i.Kind == KindFlapping {
+		return openKey(i.Host, "", i.Kind, i.Rule)
+	}
+	return openKey(i.Host, i.BootID, i.Kind, i.Rule)
+}
 
 // Load restores open incidents and known hosts. Hosts count as seen now, so a server
 // restart does not make every host look silent.
@@ -221,6 +234,7 @@ func (d *Detector) Seen(host, boot string, now time.Time) {
 		inc.Summary += fmt.Sprintf(" (host sent again after %s)", now.Sub(inc.OpenedAt).Round(time.Second))
 		inc.Resolved = true
 		d.close(context.Background(), key, inc, now)
+		d.flap(context.Background(), host, boot, "came back from silence", now)
 		d.Wake()
 	}
 	stillSilent := false
@@ -248,7 +262,7 @@ func (d *Detector) NewBoot(ctx context.Context, host, boot, prev string, now tim
 		return
 	}
 	for key, inc := range d.open {
-		if inc.Host == host && inc.BootID == prev && inc.Kind != KindReboot {
+		if inc.Host == host && inc.BootID == prev && inc.Kind != KindReboot && inc.Kind != KindFlapping {
 			d.close(ctx, key, inc, now)
 		}
 	}
@@ -256,7 +270,36 @@ func (d *Detector) NewBoot(ctx context.Context, host, boot, prev string, now tim
 		FirstRecordID: last.ID, LastRecordID: last.ID, Count: 1, OpenedAt: now, UpdatedAt: now,
 		Summary: "Rebooted into boot " + short(boot) + "." + lastLine(last)}
 	d.create(ctx, inc)
+	d.flap(ctx, host, boot, "rebooted", now)
 	d.updateOpen()
+}
+
+// flap notes a reboot or a return from silence, and opens or extends a flapping incident. mu must be held.
+func (d *Detector) flap(ctx context.Context, host, boot, what string, now time.Time) {
+	if d.cfg.FlapCount <= 0 {
+		return
+	}
+	l := append(d.flaps[host], now)
+	for len(l) > 0 && (now.Sub(l[0]) > d.cfg.FlapWindow || len(l) > d.cfg.FlapCount) {
+		l = l[1:]
+	}
+	d.flaps[host] = l
+	key := openKey(host, "", KindFlapping, "")
+	if inc := d.open[key]; inc != nil {
+		inc.Count++
+		inc.BootID, inc.UpdatedAt = boot, now
+		d.dirty[inc.ID] = inc
+		return
+	}
+	if len(l) < d.cfg.FlapCount {
+		return
+	}
+	// The boot is the newest one, so the incident links to current logs. It stays open across boots.
+	d.create(ctx, &store.Incident{Host: host, BootID: boot, Kind: KindFlapping, Severity: store.SeverityWarning,
+		Count: len(l), OpenedAt: now, UpdatedAt: now,
+		Summary: fmt.Sprintf("%d reboots or returns from silence within %s, the last one %s. Reboot and silent alerts are held back while this is open.",
+			len(l), shortDuration(d.cfg.FlapWindow), what)})
+	d.Wake()
 }
 
 // Records checks newly stored kmsg records against the rules.
@@ -378,12 +421,22 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 			delete(d.hits, key)
 		}
 	}
+	for host, l := range d.flaps {
+		if now.Sub(l[len(l)-1]) > d.cfg.FlapWindow {
+			delete(d.flaps, host)
+		}
+	}
 	for key, inc := range d.open {
 		switch {
 		case inc.Kind == KindReboot && now.Sub(inc.OpenedAt) >= d.cfg.CrashWait:
 			reboots = append(reboots, pendingReboot{key: key, inc: inc, q: crashQuery{inc.Host, inc.BootID, inc.LastRecordID}})
 		case inc.Kind == KindKernelError && d.cfg.ResolveAfter > 0 && now.Sub(inc.UpdatedAt) >= d.cfg.ResolveAfter:
 			inc.Summary += fmt.Sprintf(" (no new matching line for %s)", now.Sub(inc.UpdatedAt).Round(time.Second))
+			inc.Resolved = true
+			d.close(ctx, key, inc, now)
+			wake = true
+		case inc.Kind == KindFlapping && now.Sub(inc.UpdatedAt) >= d.cfg.FlapWindow:
+			inc.Summary += fmt.Sprintf(" (stable for %s)", now.Sub(inc.UpdatedAt).Round(time.Second))
 			inc.Resolved = true
 			d.close(ctx, key, inc, now)
 			wake = true
@@ -494,6 +547,9 @@ func (d *Detector) Resolve(ctx context.Context, id int64, user, note string, now
 		}
 		inc.Resolved = true
 		d.close(ctx, key, inc, now)
+		if inc.Kind == KindFlapping {
+			delete(d.flaps, inc.Host) // start counting again, or it opens again on the next reboot
+		}
 		d.updateOpen()
 	}
 	d.mu.Unlock()

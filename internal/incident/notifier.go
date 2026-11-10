@@ -145,6 +145,14 @@ func (n *Notifier) flush(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		flapping, err := n.Store.Incidents(ctx, store.IncidentFilter{Kind: KindFlapping, OpenOnly: true, Limit: 1000})
+		if err != nil {
+			return err
+		}
+		flappingSince := map[string]time.Time{}
+		for _, f := range flapping {
+			flappingSince[f.Host] = f.OpenedAt
+		}
 		for i := range pending {
 			p := &pending[i]
 			// Rules have their own limit, so a warning never holds back a critical line of another rule.
@@ -159,6 +167,10 @@ func (n *Notifier) flush(ctx context.Context) error {
 				state = store.AlertSkipped
 			case silenced(silences, &p.Incident, n.now()):
 				state = store.AlertSilenced
+			case (p.Kind == KindReboot || p.Kind == KindSilent) && !flappingSince[p.Host].IsZero() &&
+				!p.OpenedAt.Before(flappingSince[p.Host]):
+				// The flapping incident speaks for them.
+				state = store.AlertSuppressed
 			case n.RateLimit > 0 && n.now().Sub(n.last[key]) < n.RateLimit:
 				state = store.AlertSuppressed
 			}
@@ -275,7 +287,7 @@ func Headline(inc *store.Incident, resolved bool) string {
 		return fmt.Sprintf("[%s] lastgasp server: %s problem", inc.Severity, inc.Rule)
 	}
 	what := map[string]string{KindCrash: "crashed", KindReboot: "rebooted", KindSilent: "went silent",
-		KindKernelError: "kernel error (" + inc.Rule + ")"}[inc.Kind]
+		KindKernelError: "kernel error (" + inc.Rule + ")", KindFlapping: "keeps rebooting or going silent"}[inc.Kind]
 	if what == "" {
 		what = inc.Kind
 	}
@@ -287,6 +299,8 @@ func Headline(inc *store.Incident, resolved bool) string {
 			what = "is sending again"
 		case KindKernelError:
 			what = "kernel error (" + inc.Rule + ") is over"
+		case KindFlapping:
+			what = "is stable again"
 		}
 	}
 	return fmt.Sprintf("[%s] %s %s", level, inc.Host, what)

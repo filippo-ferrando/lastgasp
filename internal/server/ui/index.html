@@ -188,7 +188,7 @@ dialog .head { flex-wrap: wrap; }
 </dialog>
 <script>
 const LEVELS = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
-const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error", server: "server"};
+const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error", server: "server", flapping: "flapping"};
 const PAGE = 300;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));

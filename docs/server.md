@@ -147,6 +147,8 @@ More compose setups (Telegram, Alertmanager, HTTPS with Caddy, a full production
 | `-rules` | | extra incident rules, see [incidents-and-alerts.md](incidents-and-alerts.md#rules) |
 | `-silent-after` | 2m | time without packets before a `silent` incident, 0 to disable |
 | `-crash-wait` | 2m | time after a reboot to wait for pstore lines before deciding crash or reboot |
+| `-flap-count` | 3 | reboots or returns from silence within `-flap-window` that open a flapping incident, 0 to disable |
+| `-flap-window` | 1h | time window of `-flap-count`, at least 1m |
 | `-resolve-after` | 30m | close a kernel error incident as resolved after this long without a new matching line, 0 never |
 | `-incident-context` | 200 | log lines shown with an incident, 1 to 10000 |
 | `-alert-webhook` | | webhook target, repeatable |

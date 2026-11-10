@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -181,6 +182,54 @@ func TestRateRuleOpensAtCount(t *testing.T) {
 	}
 	if len(e.d.hits) != 0 {
 		t.Fatalf("hits kept: %v", e.d.hits)
+	}
+}
+
+func TestFlappingHost(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.d.cfg.FlapCount, e.d.cfg.FlapWindow = 3, time.Hour
+	h := &hook{}
+	n := &Notifier{Store: e.st, Name: "hook", URL: newHook(t, h), MinSeverity: store.SeverityInfo, Metrics: e.d.Metrics, Log: e.d.Log}
+	n.init()
+	boot := func(i int, at time.Time) {
+		e.d.NewBoot(ctx, "h", fmt.Sprint("b", i), fmt.Sprint("b", i-1), at)
+	}
+	// Two reboots far apart are not flapping.
+	boot(1, e.t0)
+	boot(2, e.t0.Add(2*time.Hour))
+	// Then three within an hour are: the third reboot alert is held back by the flapping one.
+	boot(3, e.t0.Add(4*time.Hour))
+	boot(4, e.t0.Add(4*time.Hour+20*time.Minute))
+	if l, _ := e.st.Incidents(ctx, store.IncidentFilter{Kind: KindFlapping}); len(l) != 0 {
+		t.Fatalf("flapping too early: %+v", l)
+	}
+	boot(5, e.t0.Add(4*time.Hour+40*time.Minute))
+	// Reboots are alerted once the crash check is done.
+	e.d.Tick(ctx, e.t0.Add(4*time.Hour+41*time.Minute))
+	if err := n.flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	l, _ := e.st.Incidents(ctx, store.IncidentFilter{Kind: KindFlapping})
+	if len(l) != 1 || l[0].Count != 3 || l[0].BootID != "b5" || l[0].Severity != store.SeverityWarning || !l[0].Open() {
+		t.Fatalf("flapping: %+v", l)
+	}
+	reboots, _ := e.st.Incidents(ctx, store.IncidentFilter{Kind: KindReboot})
+	if len(reboots) != 5 || alertOf(reboots[0], "hook") != store.AlertSuppressed || alertOf(reboots[1], "hook") != store.AlertSent {
+		t.Fatalf("reboot alerts: %s %s", alertOf(reboots[0], "hook"), alertOf(reboots[1], "hook"))
+	}
+	// Returns from silence count too and keep it open: the test host was silent after the reboot and again later.
+	e.d.Seen("h", "b5", e.t0.Add(4*time.Hour+41*time.Minute))
+	e.d.Tick(ctx, e.t0.Add(4*time.Hour+50*time.Minute))
+	e.d.Seen("h", "b5", e.t0.Add(4*time.Hour+51*time.Minute))
+	e.d.Tick(ctx, e.t0.Add(4*time.Hour+51*time.Minute))
+	if l, _ = e.st.Incidents(ctx, store.IncidentFilter{Kind: KindFlapping}); l[0].Count != 5 {
+		t.Fatalf("flapping after silence: %+v", l[0])
+	}
+	// An hour without reboots closes it as resolved.
+	e.d.Tick(ctx, e.t0.Add(5*time.Hour+52*time.Minute))
+	if l, _ = e.st.Incidents(ctx, store.IncidentFilter{Kind: KindFlapping}); l[0].Open() || !l[0].Resolved {
+		t.Fatalf("flapping not closed: %+v", l[0])
 	}
 }
 

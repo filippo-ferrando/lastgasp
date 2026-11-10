@@ -10,6 +10,7 @@ The server turns the moments that matter into incidents, one per host, boot, kin
 | `silent` | no packet for `-silent-after` | the host sends again (resolved), or a clean reboot | warning |
 | `reboot` | a new boot ID shows up. Open incidents of the old boot are closed | after `-crash-wait`, when the crash check finds nothing | info |
 | `crash` | a reboot where the old boot left pstore lines, or its last kernel lines match a critical rule | never resolved | critical |
+| `flapping` | `-flap-count` reboots or returns from silence within `-flap-window` (3 in 1 hour by default). Reboot and silent alerts of the host are held back (`suppressed`) while it is open | `-flap-window` without a new one (resolved) | warning |
 | `server` | a problem of the lastgasp server itself, see [Server incidents](#server-incidents) | 5 minutes without a new problem (resolved) | from the check |
 
 A clean reboot is a reboot that did not turn into a crash. A crash does not resolve the errors that led to it.

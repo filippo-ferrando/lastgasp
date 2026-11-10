@@ -48,6 +48,8 @@ func main() {
 		silentAfter  = flag.Duration("silent-after", 2*time.Minute, "time without packets before a silent incident is opened, 0 to disable")
 		crashWait    = flag.Duration("crash-wait", 2*time.Minute, "time after a reboot to wait for pstore lines before deciding crash or reboot")
 		ctxLines     = flag.Int("incident-context", 200, "log lines kept as context of an incident")
+		flapCount    = flag.Int("flap-count", 3, "reboots or returns from silence within -flap-window that open a flapping incident, 0 to disable")
+		flapWindow   = flag.Duration("flap-window", time.Hour, "time window of -flap-count")
 		resolveAfter = flag.Duration("resolve-after", 30*time.Minute, "close a kernel error incident as resolved after this long without a new matching line, 0 never")
 		alertFormat  = flag.String("alert-format", "json", "default alert body: json, slack for Slack and Mattermost, or alertmanager for the Alertmanager v2 API")
 		alertKey     = flag.String("alert-key-file", "", "default hex key file used to sign alerts in the X-Lastgasp-Signature header")
@@ -100,6 +102,8 @@ func main() {
 		fail("start", errors.New("retention limits must not be negative"))
 	case *sessionTTL < time.Minute:
 		fail("start", errors.New("-session-ttl must be at least 1m"))
+	case *flapCount < 0 || *flapCount == 1 || *flapCount > 100 || *flapWindow < time.Minute:
+		fail("start", errors.New("-flap-count must be 0 or between 2 and 100, -flap-window at least 1m"))
 	case *ctxLines < 1 || *ctxLines > 10000:
 		fail("start", errors.New("-incident-context must be between 1 and 10000"))
 	}
@@ -167,7 +171,7 @@ func main() {
 
 	im := incident.NewMetrics(reg)
 	det := incident.NewDetector(st, rules, incident.Config{SilentAfter: *silentAfter, CrashWait: *crashWait, Context: *ctxLines,
-		ResolveAfter: *resolveAfter}, im, log)
+		ResolveAfter: *resolveAfter, FlapCount: *flapCount, FlapWindow: *flapWindow}, im, log)
 	def := &incident.Notifier{Store: st, Format: *alertFormat, Key: signKey, PublicURL: *publicURL, MinSeverity: minSev,
 		RateLimit: *alertRate, Metrics: im, Log: log}
 	var targets incident.Notifiers

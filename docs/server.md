@@ -132,6 +132,10 @@ More compose setups (Telegram, Alertmanager, HTTPS with Caddy, a full production
 | --- | --- | --- |
 | `-listen` | :5140 | UDP address for agent packets |
 | `-http` | :8080 | web UI, API and `/metrics` |
+| `-netconsole-listen` | | UDP address for extended netconsole lines, like `:6666`. Empty to disable. See [Netconsole](#netconsole) |
+| `-netconsole-from` | | addresses or CIDR prefixes allowed to send netconsole lines, comma separated. Required with `-netconsole-listen` |
+| `-netconsole-hosts` | | file with `ip host` lines that name the netconsole senders, reloaded on `SIGHUP`. Required with `-netconsole-listen` |
+| `-netconsole-delay` | 10s | time a netconsole line waits before it is stored, so the agent copy of it wins |
 | `-db` | lastgasp.db | SQLite file, or a `postgres://` URL |
 | `-key-file` | | `host hexkey` lines. Optional: without it only enrolled agents are accepted |
 | `-agent-address` | `-public-url` host, `-listen` port | `host:port` agents send to, shown in install commands |
@@ -218,9 +222,37 @@ How `-retain-bytes` measures the size:
 - SQLite: the pages of the database file in use, so free pages left by deleted records do not count. The file stops growing near the limit, plus the WAL file.
 - PostgreSQL: the size of the record rows, estimated from the newest 1000 rows. Indexes and space waiting for vacuum are not counted, so leave about half of the disk budget for them.
 
+## Netconsole
+
+A kernel panic stops the agent, so the panic text normally only arrives with pstore after the reboot. The kernel netconsole sends kernel lines over UDP from the kernel itself, which still works during a panic. With `-netconsole-listen`, the server takes these lines too: the panic opens a critical incident while the machine is still down, and the reboot after it is found to be a crash, even on machines without pstore.
+
+On the server:
+
+```sh
+lastgasp-server ... -netconsole-listen :6666 -netconsole-from 10.0.0.0/24 -netconsole-hosts /etc/lastgasp/netconsole-hosts
+```
+
+```text
+# /etc/lastgasp/netconsole-hosts: source address, then the host name its agent uses
+10.0.0.7  db-01
+10.0.0.8  db-02
+```
+
+On each machine, load netconsole in extended mode (the `+`), pointing at the server address and port:
+
+```sh
+modprobe netconsole netconsole=+@/eth0,6666@10.0.0.5/
+# or on the kernel command line: netconsole=+@/eth0,6666@10.0.0.5/
+```
+
+- Only extended netconsole lines are taken: they carry the kernel sequence number, so a line that also came from the agent is stored once. Plain lines count as `netconsole_format` in `lastgasp_packets_invalid_total`.
+- A line waits `-netconsole-delay` before it is stored. The agent copy usually arrives first and wins. During a panic only netconsole gets through, and its lines are stored with the source `netconsole`.
+- Lines belong to the boot the host runs according to its agent. After a reboot, lines arrive before the new agent runs. They are dropped (`netconsole_boot`), as the agent sends the whole kernel buffer when it starts.
+- Netconsole is plain text and the sender is only known by its address, which can be faked on a shared network. Keep it on a management network, and limit `-netconsole-from` to it. Lines from other addresses count as `netconsole_source`.
+
 ## Reload
 
-`SIGHUP` reloads the key file, the rules file and the auth file:
+`SIGHUP` reloads the key file, the rules file, the auth file and the netconsole hosts file:
 
 ```sh
 systemctl reload lastgasp-server
@@ -228,7 +260,7 @@ docker compose kill -s HUP server
 kill -HUP $(pidof lastgasp-server)
 ```
 
-If a file is broken, the old keys, rules or users stay in use and the error is logged. `lastgasp_key_reloads_total{result="error"}` counts failed key reloads.
+If a file is broken, the old keys, rules, users or netconsole hosts stay in use and the error is logged. `lastgasp_key_reloads_total{result="error"}` counts failed key reloads.
 
 ## Behind a reverse proxy
 
@@ -264,6 +296,7 @@ The proxy header is only read on requests from `-auth-trusted-proxies` (localhos
 | Direction | Port | Why |
 | --- | --- | --- |
 | agents to server | UDP 5140 | packets |
+| machines to server | UDP 6666, or the `-netconsole-listen` port | netconsole lines, when enabled |
 | server to agents | UDP replies from 5140 | acks. Stateful firewalls allow them as replies |
 | users to server | TCP 8080, or 443 on the proxy | web UI and API |
 | Prometheus to server | TCP 8080 | `/metrics` |

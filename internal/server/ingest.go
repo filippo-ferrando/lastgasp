@@ -36,11 +36,16 @@ type Ingestor struct {
 	// Sessions holds the version 5 sessions. RequireFS refuses older packets, which have no forward secrecy.
 	Sessions  *Sessions
 	RequireFS bool
+	// NetconsoleDelay holds netconsole lines this long before storing, so the agent copy of a line wins.
+	NetconsoleDelay time.Duration
 
 	ch          chan inbound
 	boots       map[string]bool   // host|boot already saved
 	lastBoot    time.Time         // first_seen of the newest saved boot
 	pstoreBoots map[string]string // host|file -> boot
+	current     map[string]string // host -> newest boot seen
+	ncSeq       map[string]*ncSeq // host -> netconsole sequence state
+	ncPending   []ncPending       // netconsole lines waiting for NetconsoleDelay, oldest first
 	now         func() time.Time
 
 	ackMu   sync.Mutex
@@ -52,10 +57,27 @@ type Ingestor struct {
 }
 
 // inbound is a checked packet and the address it came from. sess is the version 5 session it came with.
+// nc is set instead of p for a netconsole line.
 type inbound struct {
 	p    *wire.Packet
 	from net.Addr
 	sess *wire.Session
+	nc   *ncLine
+}
+
+// ncSeq follows the kernel sequence numbers of a host's netconsole lines within one boot.
+type ncSeq struct {
+	boot   string
+	last   uint64
+	lastTs uint64 // kernel time of the line with seq last
+	reset  bool   // the numbers started over: the machine rebooted and its new boot is not known yet
+}
+
+// ncPending is a netconsole line with the boot it arrived in.
+type ncPending struct {
+	line ncLine
+	boot string
+	due  time.Time
 }
 
 type ackKey struct {
@@ -79,6 +101,7 @@ const cacheLimit = 100000
 func NewIngestor(st *store.Store, tr *Tracker, keys KeyLookup, m *Metrics, log *slog.Logger) *Ingestor {
 	return &Ingestor{Store: st, Tracker: tr, Keys: keys, Metrics: m, Log: log,
 		ch: make(chan inbound, 65536), boots: map[string]bool{}, pstoreBoots: map[string]string{}, now: time.Now,
+		current: map[string]string{}, ncSeq: map[string]*ncSeq{}, NetconsoleDelay: 10 * time.Second,
 		lastAck: map[rateKey]time.Time{}, Sessions: NewSessions()}
 }
 
@@ -105,7 +128,7 @@ func (in *Ingestor) Handle(b []byte, from net.Addr) []byte {
 	// Seq 0 is a probe: the agent asks if a server is there, before it sends its records.
 	if p.Kind != wire.KindHeartbeat || p.Seq != 0 {
 		select {
-		case in.ch <- inbound{p, from, nil}:
+		case in.ch <- inbound{p: p, from: from}:
 		default:
 			in.Metrics.QueueDropped.Inc()
 			return nil
@@ -193,7 +216,7 @@ func (in *Ingestor) handleFS(b []byte, from net.Addr) []byte {
 		}
 		in.Sessions.Confirm(k, s)
 		select {
-		case in.ch <- inbound{p, from, s}:
+		case in.ch <- inbound{p: p, from: from, sess: s}:
 		default:
 			in.Metrics.QueueDropped.Inc()
 		}
@@ -285,6 +308,8 @@ func (in *Ingestor) Run(ctx context.Context) {
 	defer in.running.Store(false)
 	save := time.NewTicker(5 * time.Second)
 	defer save.Stop()
+	flush := time.NewTicker(time.Second)
+	defer flush.Stop()
 	batch := make([]inbound, 0, 512)
 	// Packets already marked as received must reach the database, so writes are not cut by shutdown.
 	work := context.WithoutCancel(ctx)
@@ -292,8 +317,11 @@ func (in *Ingestor) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			in.drain(work, batch)
+			in.flushNetconsole(work, time.Time{})
 			in.saveStreams(work)
 			return
+		case <-flush.C:
+			in.flushNetconsole(work, in.now())
 		case <-save.C:
 			in.saveStreams(work)
 			in.Sessions.Sweep(in.now())
@@ -342,11 +370,16 @@ func (in *Ingestor) process(ctx context.Context, batch []inbound) {
 	beats := map[ackKey]inbound{}
 	defer func() { in.sendAcks(beats) }()
 	for _, b := range batch {
+		if b.nc != nil {
+			in.holdNetconsole(ctx, *b.nc, now)
+			continue
+		}
 		p := b.p
 		if !in.Tracker.Observe(p, now) {
 			continue
 		}
 		boot := wire.FormatBootID(p.BootID)
+		in.setCurrent(p.Host, boot)
 		if err := in.ensureBoot(ctx, p.Host, boot, now); err != nil {
 			in.Log.Error("save boot", "err", err)
 			in.Metrics.StoreErrors.Inc()
@@ -383,6 +416,11 @@ func (in *Ingestor) process(ctx context.Context, batch []inbound) {
 		recs = append(recs, rec)
 		pkts = append(pkts, p)
 	}
+	in.storeRecords(ctx, recs, pkts, now)
+}
+
+// storeRecords saves recs, made from pkts, and tells the detector. pkts is nil for netconsole lines.
+func (in *Ingestor) storeRecords(ctx context.Context, recs []*store.Record, pkts []*wire.Packet, now time.Time) {
 	if len(recs) == 0 {
 		return
 	}
@@ -446,6 +484,84 @@ func (in *Ingestor) insert(ctx context.Context, recs []*store.Record) ([]bool, e
 		}
 	}
 	return nil, err
+}
+
+func (in *Ingestor) setCurrent(host, boot string) {
+	if in.current[host] == boot {
+		return
+	}
+	if len(in.current) >= cacheLimit {
+		clear(in.current)
+	}
+	in.current[host] = boot
+}
+
+// queueNetconsole hands a netconsole line to the worker. It never blocks; a full queue drops the line.
+func (in *Ingestor) queueNetconsole(l ncLine) {
+	select {
+	case in.ch <- inbound{nc: &l}:
+	default:
+		in.Metrics.QueueDropped.Inc()
+	}
+}
+
+// holdNetconsole gives a line the boot its host runs now and keeps it for NetconsoleDelay.
+// Lines sent after a reboot, before the agent of the new boot spoke, are dropped: the agent sends them later.
+func (in *Ingestor) holdNetconsole(ctx context.Context, l ncLine, now time.Time) {
+	boot := in.current[l.host]
+	if boot == "" {
+		b, err := in.Store.LastBoot(ctx, l.host)
+		if err != nil {
+			in.Log.Error("netconsole boot", "err", err)
+			in.Metrics.StoreErrors.Inc()
+		}
+		if boot = b; boot != "" {
+			in.setCurrent(l.host, boot)
+		}
+	}
+	st := in.ncSeq[l.host]
+	if st == nil || st.boot != boot {
+		if len(in.ncSeq) >= cacheLimit {
+			clear(in.ncSeq)
+		}
+		st = &ncSeq{boot: boot, last: l.seq, lastTs: l.tsUsec}
+		in.ncSeq[l.host] = st
+	}
+	// Lines can come a little out of order. A big step back in sequence or kernel time means the kernel started over.
+	if l.seq < st.last && (st.last-l.seq > 64 || st.lastTs > l.tsUsec+5_000_000) {
+		st.reset = true
+	}
+	if l.seq >= st.last {
+		st.last, st.lastTs = l.seq, l.tsUsec
+	}
+	if boot == "" || st.reset || len(in.ncPending) >= cacheLimit {
+		in.Metrics.Invalid.WithLabelValues("netconsole_boot").Inc()
+		return
+	}
+	in.ncPending = append(in.ncPending, ncPending{line: l, boot: boot, due: now.Add(in.NetconsoleDelay)})
+}
+
+// flushNetconsole stores the held lines due at now, or all of them when now is zero.
+// They share the dedup key of the agent copy, so a line the agent already sent is not stored twice.
+func (in *Ingestor) flushNetconsole(ctx context.Context, now time.Time) {
+	n := 0
+	for n < len(in.ncPending) && (now.IsZero() || !in.ncPending[n].due.After(now)) {
+		n++
+	}
+	if n == 0 {
+		return
+	}
+	recs := make([]*store.Record, 0, n)
+	for _, h := range in.ncPending[:n] {
+		l := h.line
+		rec := &store.Record{Host: l.host, BootID: h.boot, Source: "netconsole", Seq: l.seq, Facility: int(l.priority >> 3),
+			Level: int(l.priority & 7), TsUsec: l.tsUsec, Part: 1, Parts: 1, Message: cleanText(l.msg), ReceivedAt: in.now(),
+			DedupKey: "k|" + l.host + "|" + h.boot + "|" + strconv.FormatUint(l.seq, 10) + "|1"}
+		rec.ContentKey = contentKey(rec)
+		recs = append(recs, rec)
+	}
+	in.ncPending = append(in.ncPending[:0], in.ncPending[n:]...)
+	in.storeRecords(ctx, recs, nil, in.now())
 }
 
 func (in *Ingestor) ensureBoot(ctx context.Context, host, boot string, now time.Time) error {

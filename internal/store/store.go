@@ -18,7 +18,7 @@ type Record struct {
 	ID         int64     `json:"id"`
 	Host       string    `json:"host"`
 	BootID     string    `json:"boot_id"`
-	Source     string    `json:"source"` // kmsg or pstore
+	Source     string    `json:"source"` // kmsg, pstore or netconsole
 	Seq        uint64    `json:"seq"`
 	Facility   int       `json:"facility"`
 	Level      int       `json:"level"`
@@ -31,12 +31,16 @@ type Record struct {
 	ContentKey string    `json:"-"`
 }
 
+// LiveSources are the sources of kernel lines sent while the machine runs, as opposed to pstore.
+var LiveSources = []string{"kmsg", "netconsole"}
+
 // Filter selects records. Zero values mean no filter.
 type Filter struct {
 	Host     string
 	BootID   string
 	Source   string
-	MaxLevel int // 0..7, -1 for all
+	Sources  []string // any of these, used when Source is empty
+	MaxLevel int      // 0..7, -1 for all
 	Text     string
 	AfterID  int64
 	BeforeID int64
@@ -311,6 +315,16 @@ func (s *Store) RecordBoot(ctx context.Context, host, boot string, seen time.Tim
 	return n == 1, err
 }
 
+// LastBoot returns the newest boot of host, or "" when there is none.
+func (s *Store) LastBoot(ctx context.Context, host string) (string, error) {
+	var boot string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT boot_id FROM boots WHERE host = ? ORDER BY first_seen DESC LIMIT 1`), host).Scan(&boot)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return boot, err
+}
+
 // PreviousBoot returns the boot seen just before boot, or "" when there is none.
 func (s *Store) PreviousBoot(ctx context.Context, host, boot string) (string, error) {
 	var prev string
@@ -369,7 +383,7 @@ func (s *Store) InsertBatch(ctx context.Context, recs []*Record) ([]bool, error)
 		return nil, err
 	}
 	defer insert.Close()
-	exists, err := tx.PrepareContext(ctx, s.q(`SELECT 1 FROM records WHERE content_key = ? AND source = 'kmsg' LIMIT 1`))
+	exists, err := tx.PrepareContext(ctx, s.q(`SELECT 1 FROM records WHERE content_key = ? AND source IN ('kmsg', 'netconsole') LIMIT 1`))
 	if err != nil {
 		return nil, err
 	}
@@ -413,6 +427,11 @@ func (s *Store) Query(ctx context.Context, f Filter) ([]Record, error) {
 	}
 	if f.Source != "" {
 		add("source = ?", f.Source)
+	} else if len(f.Sources) > 0 {
+		where = append(where, "source IN (?"+strings.Repeat(", ?", len(f.Sources)-1)+")")
+		for _, src := range f.Sources {
+			args = append(args, src)
+		}
 	}
 	if f.MaxLevel >= 0 && f.MaxLevel < 7 {
 		add("level <= ?", f.MaxLevel)

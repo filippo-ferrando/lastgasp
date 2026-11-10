@@ -66,6 +66,10 @@ func main() {
 		showVer      = flag.Bool("version", false, "print the version and exit")
 		agentAddr    = flag.String("agent-address", "", "host:port agents send to, used in install commands. Default: the -public-url host with the -listen port")
 		requireFS    = flag.Bool("require-forward-secrecy", false, "refuse packets before version 5, which have no forward secrecy (agents with -wait-ack=false or -forward-secrecy=false)")
+		ncListen     = flag.String("netconsole-listen", "", "UDP address for extended netconsole lines sent by the kernel itself, like :6666. Empty to disable")
+		ncFrom       = flag.String("netconsole-from", "", "comma separated addresses or CIDR prefixes allowed to send netconsole lines")
+		ncHosts      = flag.String("netconsole-hosts", "", "file with \"ip host\" lines naming the senders of netconsole lines")
+		ncDelay      = flag.Duration("netconsole-delay", 10*time.Second, "time a netconsole line waits, so the agent copy of it wins")
 		repoURL      = flag.String("repo-url", "https://git.fferrando.cc/rdfilippo/lastgasp", "repository whose releases hold the agent and its installer")
 	)
 	var webhooks, emails, telegrams stringList
@@ -110,6 +114,19 @@ func main() {
 		fail("start", errors.New("-group-min-hosts must be 0 or at least 2, -group-window above 0"))
 	case *ctxLines < 1 || *ctxLines > 10000:
 		fail("start", errors.New("-incident-context must be between 1 and 10000"))
+	}
+	ncPrefixes, err := server.ParsePrefixes(*ncFrom)
+	if err != nil {
+		fail("start", fmt.Errorf("-netconsole-from: %w", err))
+	}
+	var ncHostMap *server.NetconsoleHosts
+	if *ncListen != "" {
+		if len(ncPrefixes) == 0 || *ncHosts == "" || *ncDelay < time.Second {
+			fail("start", errors.New("-netconsole-listen needs -netconsole-from, -netconsole-hosts and a -netconsole-delay of at least 1s"))
+		}
+		if ncHostMap, err = server.LoadNetconsoleHosts(*ncHosts); err != nil {
+			fail("load netconsole hosts", err)
+		}
 	}
 	maxBytes, err := server.ParseSize(*retainSize)
 	if err != nil {
@@ -236,6 +253,17 @@ func main() {
 	enroller.Reply = func(b []byte, to net.Addr) { conn.WriteTo(b, to) }
 	workers.Go(func() { enroller.Run(ctx) })
 	go in.Listen(conn)
+	var nc *server.Netconsole
+	var ncConn net.PacketConn
+	if *ncListen != "" {
+		in.NetconsoleDelay = *ncDelay
+		if ncConn, err = net.ListenPacket("udp", *ncListen); err != nil {
+			fail("listen netconsole", err)
+		}
+		nc = &server.Netconsole{In: in, From: ncPrefixes}
+		nc.Hosts.Store(ncHostMap)
+		go nc.Listen(ncConn)
+	}
 	done := make(chan struct{})
 	go func() { in.Run(ctx); close(done) }()
 
@@ -261,7 +289,7 @@ func main() {
 		log.Warn("the web UI and API have no login and listen on a public address, use -auth-file", "http", *httpAddr)
 	}
 
-	// SIGHUP reloads the key file, the rules and the auth file. On error the old ones stay in use.
+	// SIGHUP reloads the key file, the rules, the auth file and the netconsole hosts. On error the old ones stay in use.
 	go func() {
 		for range hup {
 			if keyFileRing == nil {
@@ -278,6 +306,13 @@ func main() {
 					log.Error("reload auth file, keeping the old users", "err", err)
 				} else {
 					log.Info("auth file reloaded", "users", api.Auth.Users())
+				}
+			}
+			if nc != nil {
+				if h, err := server.LoadNetconsoleHosts(*ncHosts); err != nil {
+					log.Error("reload netconsole hosts, keeping the old ones", "err", err)
+				} else {
+					nc.Hosts.Store(h)
 				}
 			}
 			if r, err := incident.LoadRules(*rulesFile); err != nil {
@@ -305,6 +340,9 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 	conn.Close()
+	if ncConn != nil {
+		ncConn.Close()
+	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdown)

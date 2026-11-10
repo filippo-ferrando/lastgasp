@@ -48,6 +48,7 @@ label.live { display: flex; gap: 6px; align-items: center; }
 .lv0, .lv1, .lv2, .lv3 { color: var(--bad); } .lv4 { color: var(--warn); } .lv7 { color: var(--muted); }
 .tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); }
 .tag.pstore { border-color: var(--accent); color: var(--accent); }
+.tag.netconsole { border-color: var(--warn); color: var(--warn); }
 .ranges { font-family: var(--mono); font-size: 12px; white-space: normal; }
 .sev { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
 .sev-critical { color: var(--bad); } .sev-warning { color: var(--warn); } .sev-info { color: var(--muted); }
@@ -158,7 +159,7 @@ dialog .head { flex-wrap: wrap; }
         <option value="4">warning and above</option><option value="5">notice and above</option>
         <option value="6">info and above</option>
       </select>
-      <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option></select>
+      <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option><option value="netconsole">netconsole</option></select>
       <input id="f-q" type="search" placeholder="search text" aria-label="search text" title="Press / to search, Escape to clear">
       <input id="f-boot" type="hidden">
       <button id="f-boot-chip" hidden title="Show every boot"></button>
@@ -374,7 +375,8 @@ const logs = {gen: 0, newest: 0, oldest: 0, noOlder: false, loadingOlder: false,
 
 function logRow(r) {
   const part = r.parts > 1 ? ` <span class="tag">part ${r.part}/${r.parts}</span>` : "";
-  const src = r.source === "pstore" ? ' <span class="tag pstore" title="Saved by the kernel before a crash or reboot">pstore</span>' : "";
+  const src = r.source === "pstore" ? ' <span class="tag pstore" title="Saved by the kernel before a crash or reboot">pstore</span>'
+    : r.source === "netconsole" ? ' <span class="tag netconsole" title="Sent by the kernel netconsole as plain text, not by the agent: not authenticated">netconsole</span>' : "";
   return `<tr${r.id === logs.mark ? ' class="hit"' : ""}><td class="meta hostlink" data-host="${esc(r.host)}" title="Show only ${esc(r.host)}">${esc(r.host)}</td>
     <td class="meta" title="boot ${esc(r.boot_id)}, received ${esc(new Date(r.received_at).toLocaleString())}">[${tsFmt(r.ts_usec)}]</td>
     <td class="meta lv${r.level}">${LEVELS[r.level]}</td><td class="lv${r.level}">${esc(r.message)}${part}${src}</td></tr>`;

@@ -81,7 +81,7 @@ func (n *Notifier) emailMessage(ctx context.Context, p *store.PendingAlert) ([]b
 			}
 		}
 		if inc.LastRecordID > 0 {
-			recs, err := n.Store.Query(ctx, store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "kmsg", MaxLevel: -1,
+			recs, err := n.Store.Query(ctx, store.Filter{Host: inc.Host, BootID: inc.BootID, Sources: store.LiveSources, MaxLevel: -1,
 				BeforeID: inc.LastRecordID + 1, Limit: emailLines})
 			if err != nil {
 				return nil, err

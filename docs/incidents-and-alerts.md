@@ -44,7 +44,7 @@ Agent hosts should not be named `@server`. The Prometheus rules in [operations.m
 
 If the database fails during the check, the reboot stays open and the check runs again on the next second, so a crash is never logged as a clean reboot because of a database error.
 
-A kernel panic stops the whole machine at once, including the agent, so the panic line itself only reaches the server through pstore. Without a pstore backend, a panic shows up as a `reboot`, unless critical lines were sent before it.
+A kernel panic stops the whole machine at once, including the agent, so the panic line itself only reaches the server through pstore, or through [netconsole](server.md#netconsole) when it is set up. Without either, a panic shows up as a `reboot`, unless critical lines were sent before it.
 
 ### pstore backends
 

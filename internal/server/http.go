@@ -247,13 +247,13 @@ func (a *API) incident(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	if inc.LastRecordID > 0 {
-		v.Records, err = a.Store.Query(r.Context(), store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "kmsg",
+		v.Records, err = a.Store.Query(r.Context(), store.Filter{Host: inc.Host, BootID: inc.BootID, Sources: store.LiveSources,
 			MaxLevel: -1, BeforeID: inc.LastRecordID + 1, Limit: n})
 		for i, j := 0, len(v.Records)-1; i < j; i, j = i+1, j-1 {
 			v.Records[i], v.Records[j] = v.Records[j], v.Records[i]
 		}
 		if err == nil {
-			v.After, err = a.Store.Query(r.Context(), store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "kmsg",
+			v.After, err = a.Store.Query(r.Context(), store.Filter{Host: inc.Host, BootID: inc.BootID, Sources: store.LiveSources,
 				MaxLevel: -1, AfterID: inc.LastRecordID, Limit: afterLines})
 		}
 	}

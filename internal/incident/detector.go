@@ -324,7 +324,7 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 			}
 			continue
 		}
-		if r.Source != "kmsg" {
+		if r.Source != "kmsg" && r.Source != "netconsole" {
 			continue
 		}
 		rule := rules.Match(r.Message)
@@ -632,7 +632,7 @@ func (d *Detector) checkCrash(ctx context.Context, q crashQuery) (*crash, error)
 	}
 	var tail []store.Record
 	if q.lastRecordID > 0 {
-		tail, err = d.Store.Query(ctx, store.Filter{Host: q.host, BootID: q.boot, Source: "kmsg", MaxLevel: -1,
+		tail, err = d.Store.Query(ctx, store.Filter{Host: q.host, BootID: q.boot, Sources: store.LiveSources, MaxLevel: -1,
 			BeforeID: q.lastRecordID + 1, Limit: d.cfg.Context})
 		if err != nil {
 			d.Log.Error("crash check, will retry", "err", err)

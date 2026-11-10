@@ -686,6 +686,32 @@ func TestRetention(t *testing.T) {
 	}
 }
 
+func TestIncidentShowsLinesAfterAndLogsFilterByBoot(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	e.send(t, kmsgPkt(0xa, 1, 1, 0, 100, "before"))
+	e.send(t, kmsgPkt(0xa, 1, 2, 1, 200, "BUG: unable to handle page fault"))
+	for i := uint64(3); i <= 30; i++ {
+		e.send(t, kmsgPkt(0xa, 1, i, i, i*100, fmt.Sprint("after ", i)))
+	}
+	e.send(t, kmsgPkt(0xb, 2, 1, 0, 100, "other boot"))
+	e.waitRecords(t, 31)
+	var list []store.Incident
+	json.Unmarshal([]byte(e.get(t, "/api/incidents?kind=kernel_error")), &list)
+	if len(list) != 1 {
+		t.Fatalf("incidents %+v", list)
+	}
+	var v IncidentView
+	json.Unmarshal([]byte(e.get(t, "/api/incidents/"+strconv.FormatInt(list[0].ID, 10))), &v)
+	if len(v.Records) != 2 || len(v.After) != afterLines || v.After[0].Message != "after 3" {
+		t.Fatalf("records %d, after %+v", len(v.Records), v.After)
+	}
+	var recs []store.Record
+	json.Unmarshal([]byte(e.get(t, "/api/logs?boot="+wire.FormatBootID([16]byte{0xb}))), &recs)
+	if len(recs) != 1 || recs[0].Message != "other boot" {
+		t.Fatalf("boot filter: %+v", recs)
+	}
+}
+
 // TestCrashIncidentEndToEnd sends a boot that dies with a panic, then the next boot with pstore lines.
 func TestCrashIncidentEndToEnd(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))

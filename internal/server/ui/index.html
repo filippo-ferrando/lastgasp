@@ -63,7 +63,7 @@ dialog h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; lett
 dialog pre { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 45vh; overflow: auto; }
 pre .ln { display: block; }
-pre .hit { background: color-mix(in srgb, var(--bad) 22%, transparent); }
+pre .hit, tr.hit td { background: color-mix(in srgb, var(--bad) 22%, transparent); }
 button:hover:not(:disabled), a.btn:hover, select:hover, input:hover { border-color: var(--muted); }
 button:focus-visible, a.btn:focus-visible, select:focus-visible, input:focus-visible, tr.click:focus-visible {
   outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -160,6 +160,8 @@ dialog .head { flex-wrap: wrap; }
       </select>
       <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option></select>
       <input id="f-q" type="search" placeholder="search text" aria-label="search text" title="Press / to search, Escape to clear">
+      <input id="f-boot" type="hidden">
+      <button id="f-boot-chip" hidden title="Show every boot"></button>
       <button id="f-clear" hidden>clear filters</button>
       <span class="grow"></span>
       <label class="live" title="Add new lines as they arrive"><input type="checkbox" id="f-live" checked> live</label>
@@ -173,7 +175,7 @@ dialog .head { flex-wrap: wrap; }
 <dialog id="inc-dialog" aria-labelledby="inc-title">
   <div class="head"><h3 id="inc-title"></h3>
     <button id="inc-copy" title="Copy a link to this incident">copy link</button>
-    <button id="inc-logs" title="Show the logs of this host">show logs</button>
+    <button id="inc-logs" title="Show the logs of this boot at the incident">show logs</button>
     <button id="inc-ack" class="primary">acknowledge</button>
     <button id="inc-close" title="Close (Escape)">close</button></div>
   <div class="actions" id="inc-actions" hidden>
@@ -264,7 +266,7 @@ function render(el, html) {
 }
 
 // Filters live in the address, so a view can be shared and survives a reload.
-const FILTERS = [["host", "f-host"], ["level", "f-level"], ["source", "f-source"], ["q", "f-q"]];
+const FILTERS = [["host", "f-host"], ["boot", "f-boot"], ["level", "f-level"], ["source", "f-source"], ["q", "f-q"]];
 
 function filterQuery() {
   const p = new URLSearchParams();
@@ -278,6 +280,8 @@ function saveFilters() {
   const q = p.toString();
   history.replaceState(null, "", location.pathname + (q ? "?" + q : "") + location.hash);
   $("f-clear").hidden = !filterQuery().toString();
+  $("f-boot-chip").hidden = !$("f-boot").value;
+  $("f-boot-chip").textContent = "boot " + $("f-boot").value.slice(0, 8) + " \u00d7";
   $("download").href = "/api/download?" + filterQuery();
 }
 
@@ -294,8 +298,10 @@ function loadFilters() {
   saveFilters();
 }
 
+// A boot belongs to one host, so its filter goes when the host changes.
 function setHost(host) {
   setHostOption(host);
+  if ($("f-host").value !== host) $("f-boot").value = "";
   $("f-host").value = host;
   filtersChanged();
 }
@@ -363,12 +369,13 @@ async function loadGaps() {
 
 // Logs. gen grows on every filter change, so answers to older requests are thrown away.
 
-const logs = {gen: 0, newest: 0, oldest: 0, noOlder: false, loadingOlder: false, unseen: 0};
+// anchor is a record to load the view around and mark, set by "show logs" of an incident.
+const logs = {gen: 0, newest: 0, oldest: 0, noOlder: false, loadingOlder: false, unseen: 0, anchor: 0, mark: 0};
 
 function logRow(r) {
   const part = r.parts > 1 ? ` <span class="tag">part ${r.part}/${r.parts}</span>` : "";
   const src = r.source === "pstore" ? ' <span class="tag pstore" title="Saved by the kernel before a crash or reboot">pstore</span>' : "";
-  return `<tr><td class="meta hostlink" data-host="${esc(r.host)}" title="Show only ${esc(r.host)}">${esc(r.host)}</td>
+  return `<tr${r.id === logs.mark ? ' class="hit"' : ""}><td class="meta hostlink" data-host="${esc(r.host)}" title="Show only ${esc(r.host)}">${esc(r.host)}</td>
     <td class="meta" title="boot ${esc(r.boot_id)}, received ${esc(new Date(r.received_at).toLocaleString())}">[${tsFmt(r.ts_usec)}]</td>
     <td class="meta lv${r.level}">${LEVELS[r.level]}</td><td class="lv${r.level}">${esc(r.message)}${part}${src}</td></tr>`;
 }
@@ -395,9 +402,20 @@ async function reloadLogs() {
   const gen = ++logs.gen;
   const p = filterQuery();
   p.set("limit", PAGE);
+  logs.mark = logs.anchor;
+  logs.anchor = 0;
   let recs;
   try {
-    recs = await getJSON("/api/logs?" + p);
+    if (logs.mark) {
+      // Newest first like a normal page: the lines after the anchor, then the anchor and the ones before it.
+      const after = new URLSearchParams(p), before = new URLSearchParams(p);
+      after.set("after_id", logs.mark);
+      before.set("before_id", logs.mark + 1);
+      const [a, b] = await Promise.all([getJSON("/api/logs?" + after), getJSON("/api/logs?" + before)]);
+      recs = a.reverse().concat(b);
+    } else {
+      recs = await getJSON("/api/logs?" + p);
+    }
   } catch (e) {
     if (gen === logs.gen) setStatus(e);
     return;
@@ -410,7 +428,11 @@ async function reloadLogs() {
   logs.oldest = recs.length ? recs[recs.length - 1].id : 0;
   logs.noOlder = recs.length < PAGE;
   logs.loadingOlder = false;
-  toBottom();
+  const hit = $("logrows").querySelector("tr.hit");
+  if (hit) {
+    hit.scrollIntoView({block: "center"});
+    updateLogUI();
+  } else toBottom();
 }
 
 async function pollLogs() {
@@ -657,7 +679,8 @@ async function showIncident(id) {
     (i.note ? `<h4>Note</h4><pre>${esc(i.note)}</pre>` : "") +
     (v.pstore.length ? `<h4>Saved by the kernel before the reboot (pstore, ${fmtNum(v.pstore.length)} lines)</h4><pre>${block(v.pstore)}</pre>` : "") +
     `<h4>Last kernel lines received (${fmtNum(v.records.length)})</h4>` +
-    (v.records.length ? `<pre id="inc-tail">${block(v.records)}</pre>` : '<div class="empty">No lines received for this boot.</div>');
+    (v.records.length ? `<pre id="inc-tail">${block(v.records)}</pre>` : '<div class="empty">No lines received for this boot.</div>') +
+    (v.after.length ? `<h4>Next lines received (${fmtNum(v.after.length)})</h4><pre>${block(v.after)}</pre>` : "");
   const tail = $("inc-tail");
   if (tail) tail.scrollTop = tail.scrollHeight;
 }
@@ -732,10 +755,14 @@ $("inc-silence").onclick = async () => {
 $("inc-copy").onclick = () => copyButton($("inc-copy"), location.href, "copy link");
 $("inc-logs").onclick = () => {
   if (!shown) return;
-  const host = shown.host;
+  const {host, boot_id, last_record_id} = shown;
   closeIncident();
   $("f-level").value = $("f-source").value = $("f-q").value = "";
-  setHost(host);
+  setHostOption(host);
+  $("f-host").value = host;
+  $("f-boot").value = boot_id || "";
+  logs.anchor = last_record_id || 0;
+  filtersChanged();
   $("logs-section").scrollIntoView({behavior: "smooth"});
 };
 
@@ -792,13 +819,15 @@ async function refresh() {
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
-for (const id of ["f-host", "f-level", "f-source"]) $(id).onchange = filtersChanged;
+for (const id of ["f-level", "f-source"]) $(id).onchange = filtersChanged;
+$("f-host").onchange = () => { $("f-boot").value = ""; filtersChanged(); };
 let typing;
 $("f-q").oninput = () => { clearTimeout(typing); typing = setTimeout(filtersChanged, 300); };
 $("f-q").onkeydown = e => {
   if (e.key === "Enter") { clearTimeout(typing); filtersChanged(); }
   if (e.key === "Escape" && $("f-q").value) { e.preventDefault(); $("f-q").value = ""; clearTimeout(typing); filtersChanged(); }
 };
+$("f-boot-chip").onclick = () => { $("f-boot").value = ""; filtersChanged(); };
 $("f-clear").onclick = () => {
   for (const [, id] of FILTERS) $(id).value = "";
   filtersChanged();

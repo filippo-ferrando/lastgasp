@@ -4,6 +4,7 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- "show logs" of an incident opens the logs of its boot at the incident line. `/api/logs` takes `boot=`, and `/api/incidents/{id}` adds the next 20 lines as `after`.
 - Kernel lines from pstore are escaped like `/dev/kmsg` lines (tabs, backslashes and non-ASCII bytes appear as `\xNN`), and the lines of one multi-line record are joined into one record. Pstore copies of multi-line records are now deduplicated against kmsg. Custom rules that match pstore text with such characters need the escaped form.
 - New `-retain-bytes` flag (Helm `server.retainBytes`): keeps the records under a size such as `20GiB`.
 - An ack lists up to 64 missing ranges instead of 32, so heavy loss is repaired in half the heartbeats. The server sends 64 only to agents of v0.1.6 or newer (development builds get 32), so agents and server can be upgraded in any order.

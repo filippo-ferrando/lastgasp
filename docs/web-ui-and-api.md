@@ -15,9 +15,9 @@ The header shows the user, the server version and a "log out" button. The page r
 | Missing packets | agent runs with missing packets and the missing sequence ranges |
 | Logs | live kernel lines, filtered by host, level, source and text. A click on the host of a line filters by that host. "live" off stops new lines. "older" loads 300 more and says when there are none. "download" saves all matching lines as NDJSON. When new lines arrive while the view is scrolled up, a button jumps to them |
 
-The incident window has buttons to copy its link and show the logs of its host. Admins also get a note field and buttons to acknowledge, resolve, and silence the host for 1, 4 or 24 hours. The note is saved with acknowledge or resolve and shown on the incident. It closes with Escape, the close button or a click outside.
+The incident window shows the kernel lines up to the incident and the next 20 lines after it. It has buttons to copy its link and show the logs of its boot, scrolled to the incident line and marked. Admins also get a note field and buttons to acknowledge, resolve, and silence the host for 1, 4 or 24 hours. The note is saved with acknowledge or resolve and shown on the incident. It closes with Escape, the close button or a click outside.
 
-Filters are part of the address (`/?host=db-01&level=3`), so a filtered view can be shared or bookmarked. An incident has its own link: `https://lastgasp.example.net/#incident=42`. Alerts use these links when `-public-url` is set.
+Filters are part of the address (`/?host=db-01&level=3`, plus `boot=` after "show logs" of an incident, removed with its button), so a filtered view can be shared or bookmarked. An incident has its own link: `https://lastgasp.example.net/#incident=42`. Alerts use these links when `-public-url` is set.
 
 | Key | Does |
 | --- | --- |
@@ -93,10 +93,10 @@ alias lg='curl -sf -H "Authorization: Bearer $T"'
 | `POST /api/logout` | ends the session of the cookie |
 | `GET /api/hosts` | per host counters, as in the Hosts table |
 | `GET /api/streams?host=&all=1` | agent runs with missing ranges (`all=1` for every run) |
-| `GET /api/logs?host=&level=&source=&q=&after_id=&before_id=&limit=` | records, newest first. With `after_id`, oldest first |
+| `GET /api/logs?host=&boot=&level=&source=&q=&after_id=&before_id=&limit=` | records, newest first. With `after_id`, oldest first |
 | `GET /api/download?host=&level=&source=&q=` | all matching records as NDJSON, oldest first |
 | `GET /api/incidents?host=&kind=&open=1&limit=` | incidents with their alert state per target, newest first |
-| `GET /api/incidents/{id}` | one incident with its kernel lines and pstore lines |
+| `GET /api/incidents/{id}` | one incident with its kernel lines (`records`), the next 20 lines (`after`) and pstore lines |
 | `POST /api/incidents/{id}/ack` | marks an incident as seen. Optional body `{"note": "..."}` |
 | `POST /api/incidents/{id}/resolve` | closes an incident as resolved and sends resolve alerts. Optional body `{"note": "..."}`. 409 for an open reboot or silent incident |
 | `GET /api/silences?all=1` | active and upcoming silences (`all=1` adds those that ended in the last day) |
@@ -118,6 +118,7 @@ The `POST` and `DELETE` endpoints need the admin role, except login and logout. 
 | Parameter | Meaning |
 | --- | --- |
 | `host` | one host |
+| `boot` | one boot ID, as shown on incidents |
 | `level` | this level and more severe: 0 emerg, 1 alert, 2 crit, 3 err, 4 warning, 5 notice, 6 info |
 | `source` | `kmsg` or `pstore` |
 | `q` | text contained in the message, case insensitive. `%` and `_` are plain characters |

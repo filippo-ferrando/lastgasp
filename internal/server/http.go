@@ -154,7 +154,7 @@ func (a *API) streams(w http.ResponseWriter, r *http.Request) {
 
 func parseFilter(r *http.Request) store.Filter {
 	q := r.URL.Query()
-	f := store.Filter{Host: q.Get("host"), Source: q.Get("source"), Text: q.Get("q"), MaxLevel: -1}
+	f := store.Filter{Host: q.Get("host"), BootID: q.Get("boot"), Source: q.Get("source"), Text: q.Get("q"), MaxLevel: -1}
 	if v, err := strconv.Atoi(q.Get("level")); err == nil {
 		f.MaxLevel = v
 	}
@@ -224,18 +224,23 @@ func (a *API) incidents(w http.ResponseWriter, r *http.Request) {
 }
 
 // IncidentView is an incident with the log lines that explain it, oldest first.
+// After holds the first lines received after the incident, which often tell how it went on.
 type IncidentView struct {
 	Incident store.Incident `json:"incident"`
 	Records  []store.Record `json:"records"`
+	After    []store.Record `json:"after"`
 	Pstore   []store.Record `json:"pstore"`
 }
+
+// afterLines is how many lines after an incident its view shows.
+const afterLines = 20
 
 func (a *API) incident(w http.ResponseWriter, r *http.Request) {
 	inc, ok := a.loadIncident(w, r)
 	if !ok {
 		return
 	}
-	v := IncidentView{Incident: inc, Records: []store.Record{}, Pstore: []store.Record{}}
+	v := IncidentView{Incident: inc}
 	n := a.Context
 	if n <= 0 {
 		n = 200
@@ -247,6 +252,10 @@ func (a *API) incident(w http.ResponseWriter, r *http.Request) {
 		for i, j := 0, len(v.Records)-1; i < j; i, j = i+1, j-1 {
 			v.Records[i], v.Records[j] = v.Records[j], v.Records[i]
 		}
+		if err == nil {
+			v.After, err = a.Store.Query(r.Context(), store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "kmsg",
+				MaxLevel: -1, AfterID: inc.LastRecordID, Limit: afterLines})
+		}
 	}
 	if err == nil && (inc.Kind == "crash" || inc.Kind == "reboot") {
 		v.Pstore, err = a.Store.Query(r.Context(), store.Filter{Host: inc.Host, BootID: inc.BootID, Source: "pstore",
@@ -256,11 +265,10 @@ func (a *API) incident(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if v.Records == nil {
-		v.Records = []store.Record{}
-	}
-	if v.Pstore == nil {
-		v.Pstore = []store.Record{}
+	for _, l := range []*[]store.Record{&v.Records, &v.After, &v.Pstore} {
+		if *l == nil {
+			*l = []store.Record{}
+		}
 	}
 	writeJSON(w, v)
 }

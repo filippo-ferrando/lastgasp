@@ -38,8 +38,12 @@ const (
 	recordFixed = 2 + 8 + 8 + 8 + 1 + 1 + 2
 	statsSize   = 7*8 + 4
 
-	// MaxAckRanges bounds the missing ranges in one ack, so it always fits one packet.
-	MaxAckRanges = 32
+	// MaxAckRanges bounds the missing ranges in one ack, so it fits one packet even with the longest host.
+	MaxAckRanges = 64
+	// LegacyAckRanges is the limit of agents older than WideAcksSince, which refuse longer acks.
+	LegacyAckRanges = 32
+	// WideAcksSince is the first agent version that reads MaxAckRanges ranges.
+	WideAcksSince = "v0.1.6"
 	// MaxAgentVersion bounds the agent version in a heartbeat.
 	MaxAgentVersion = 64
 )
@@ -232,6 +236,52 @@ func header(ver uint8, host string, bootID [16]byte, instance, ctr uint64) []byt
 	b = append(b, bootID[:]...)
 	b = binary.BigEndian.AppendUint64(b, instance)
 	return binary.BigEndian.AppendUint64(b, ctr)
+}
+
+// AckRanges returns how many missing ranges an ack to an agent of this version may hold.
+// Development builds and versions that cannot be parsed get the legacy limit.
+func AckRanges(agentVersion string) int {
+	have, ok := parseVersion(agentVersion)
+	want, _ := parseVersion(WideAcksSince)
+	if !ok {
+		return LegacyAckRanges
+	}
+	for i := range have {
+		if have[i] != want[i] {
+			if have[i] > want[i] {
+				return MaxAckRanges
+			}
+			return LegacyAckRanges
+		}
+	}
+	return MaxAckRanges
+}
+
+// parseVersion reads "vX.Y.Z", ignoring anything after the patch number such as "-rc1".
+func parseVersion(v string) ([3]int, bool) {
+	var out [3]int
+	v, ok := strings.CutPrefix(v, "v")
+	if !ok {
+		return out, false
+	}
+	for i := range out {
+		n := 0
+		digits := 0
+		for digits < len(v) && v[digits] >= '0' && v[digits] <= '9' && digits < 9 {
+			n = n*10 + int(v[digits]-'0')
+			digits++
+		}
+		if digits == 0 {
+			return out, false
+		}
+		out[i], v = n, v[digits:]
+		if i < 2 {
+			if v, ok = strings.CutPrefix(v, "."); !ok {
+				return out, false
+			}
+		}
+	}
+	return out, true
 }
 
 // EncodeAck builds the server answer to the heartbeat p, sealed with the key of p's host.

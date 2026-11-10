@@ -422,7 +422,8 @@ func (in *Ingestor) sendAcks(beats map[ackKey]inbound) {
 		return
 	}
 	for k, b := range beats {
-		upto, missing := in.Tracker.Progress(StreamKey{k.host, wire.FormatBootID(k.bootID), k.instance})
+		key := StreamKey{k.host, wire.FormatBootID(k.bootID), k.instance}
+		upto, missing := in.Tracker.Progress(key, wire.AckRanges(b.p.AgentVersion))
 		if ack := in.ack(b, upto, missing); ack != nil {
 			(*reply)(ack, b.from)
 		}

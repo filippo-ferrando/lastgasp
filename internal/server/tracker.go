@@ -116,8 +116,8 @@ func (s *Stream) forgetBelow(oldest uint64) {
 }
 
 // Progress tells what arrived on a stream, for an ack: every packet up to upto except missing.
-// At most wire.MaxAckRanges ranges are given, upto stops before the first one left out.
-func (t *Tracker) Progress(k StreamKey) (upto uint64, missing []wire.Range) {
+// At most limit ranges are given, upto stops before the first one left out.
+func (t *Tracker) Progress(k StreamKey, limit int) (upto uint64, missing []wire.Range) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	s := t.streams[k]
@@ -126,7 +126,7 @@ func (t *Tracker) Progress(k StreamKey) (upto uint64, missing []wire.Range) {
 	}
 	upto = s.MaxSeq
 	for i, r := range s.MissingSet {
-		if i == wire.MaxAckRanges {
+		if i == limit {
 			upto = r.From - 1
 			break
 		}

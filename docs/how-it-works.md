@@ -97,7 +97,7 @@ The agent clock for acks is monotonic, so a clock step at boot (RTC wrong, NTP f
 
 ### Sending lost records again
 
-An ack also says what arrived: every packet up to a sequence number, except a list of missing ranges (at most 32, the rest is left for the next ack).
+An ack also says what arrived: every packet up to a sequence number, except a list of missing ranges (at most 64, the rest is left for the next ack). Agents older than v0.1.6 refuse more than 32, so they get at most 32.
 
 1. The agent keeps every sent record in its buffer until an ack covers it. Then the record is done.
 2. A record that an ack lists as missing is sent again with its first sequence number, so the server counts it as late. It is sent again only if its last send came before the heartbeat that the ack answers, so a record still on its way is not sent twice.

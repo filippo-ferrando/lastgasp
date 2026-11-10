@@ -272,6 +272,33 @@ func TestAckWithAllRangesFits(t *testing.T) {
 	}
 }
 
+func TestSessionAckWithAllRangesFits(t *testing.T) {
+	agent, server := sessionPair(t, strings.Repeat("h", MaxHostLen))
+	missing := make([]Range, MaxAckRanges)
+	for i := range missing {
+		missing[i] = Range{uint64(i * 2), uint64(i * 2)}
+	}
+	b, err := server.SealAck(&Packet{Kind: KindHeartbeat, Seq: 1}, 1000, missing)
+	if err != nil || len(b) > MaxPacket {
+		t.Fatalf("ack of %d bytes, err %v", len(b), err)
+	}
+	if a, err := agent.OpenAck(b); err != nil || len(a.Missing) != MaxAckRanges {
+		t.Fatalf("ack %d ranges, err %v", len(a.Missing), err)
+	}
+}
+
+func TestAckRangesByAgentVersion(t *testing.T) {
+	for v, want := range map[string]int{
+		"": LegacyAckRanges, "dev": LegacyAckRanges, "dev-0123abcd": LegacyAckRanges,
+		"v0.1.5": LegacyAckRanges, "v0.0.9": LegacyAckRanges, "v0.1": LegacyAckRanges,
+		"v0.1.6": MaxAckRanges, "v0.1.6-rc1": MaxAckRanges, "v0.2.0": MaxAckRanges, "v1.0.0-abc-dirty": MaxAckRanges,
+	} {
+		if got := AckRanges(v); got != want {
+			t.Errorf("%q: got %d, want %d", v, got, want)
+		}
+	}
+}
+
 func TestVersionTwoStillAccepted(t *testing.T) {
 	// Agents upgraded after the server still send version 2, without Oldest.
 	p := samplePacket()

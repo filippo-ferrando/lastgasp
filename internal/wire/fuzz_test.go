@@ -139,8 +139,14 @@ func FuzzOpenAck(f *testing.F) {
 func FuzzDecode(f *testing.F) {
 	b4, _ := Encode(samplePacket(), testKey)
 	ack4, _ := EncodeAck(samplePacket(), 7, nil, testKey)
+	wide := make([]Range, MaxAckRanges)
+	for i := range wide {
+		wide[i] = Range{uint64(i * 2), uint64(i * 2)}
+	}
+	ackWide, _ := EncodeAck(samplePacket(), 1000, wide, testKey)
 	f.Add(b4)
 	f.Add(ack4)
+	f.Add(ackWide)
 	f.Fuzz(func(t *testing.T, b []byte) {
 		p := samplePacket()
 		Decode(b, keyFor)

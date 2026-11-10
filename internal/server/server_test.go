@@ -369,6 +369,24 @@ func TestAckTellsWhatArrived(t *testing.T) {
 	}
 }
 
+func TestAckRangesFollowAgentVersion(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	r := &replies{}
+	e.in.SetReply(r.add)
+	// Each run loses every other packet, so it has more gaps than any ack holds.
+	for inst, v := range map[uint64]string{1: "v0.1.5", 2: wire.WideAcksSince} {
+		for seq := uint64(1); seq <= 2*wire.MaxAckRanges+10; seq += 2 {
+			e.send(t, kmsgPkt(1, inst, seq, inst*1000+seq, seq, "m"))
+		}
+		beat := pkt("node-1", 1, inst, 2*wire.MaxAckRanges+20)
+		beat.AgentVersion = v
+		e.send(t, beat)
+		if a := r.wait(t, beat); len(a.Missing) != wire.AckRanges(v) {
+			t.Fatalf("agent %s got %d ranges", v, len(a.Missing))
+		}
+	}
+}
+
 func TestTrackerProgressAndForget(t *testing.T) {
 	tr := NewTracker()
 	now := time.Now()
@@ -377,15 +395,17 @@ func TestTrackerProgressAndForget(t *testing.T) {
 		tr.Observe(pkt("h", 1, 1, seq), now)
 	}
 	// Only the first ranges fit an ack, and upto stops before the others.
-	upto, missing := tr.Progress(k)
-	if len(missing) != wire.MaxAckRanges || upto != missing[len(missing)-1].To+1 {
-		t.Fatalf("upto %d, %d ranges", upto, len(missing))
+	for _, limit := range []int{wire.LegacyAckRanges, wire.MaxAckRanges} {
+		upto, missing := tr.Progress(k, limit)
+		if len(missing) != limit || upto != missing[len(missing)-1].To+1 {
+			t.Fatalf("limit %d: upto %d, %d ranges", limit, upto, len(missing))
+		}
 	}
 	// A heartbeat says nothing below 20 can come again.
-	beat := pkt("h", 1, 1, 100)
+	beat := pkt("h", 1, 1, 2*wire.MaxAckRanges+20)
 	beat.Oldest = 20
 	tr.Observe(beat, now)
-	if _, missing = tr.Progress(k); missing[0].From != 20 {
+	if _, missing := tr.Progress(k, wire.MaxAckRanges); missing[0].From != 20 {
 		t.Fatalf("ranges %v", missing)
 	}
 	if s := tr.Snapshot()[0]; s.Missing() != s.Gaps {

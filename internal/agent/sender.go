@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,9 @@ type Sender struct {
 	// ForwardSecrecy uses version 5 sessions with a Noise handshake per server. It needs WaitAck.
 	ForwardSecrecy bool
 	Version        string // agent version sent in heartbeats
+	// PmsgPath gets the kmsg records still unconfirmed when Run stops, up to PmsgMax bytes. Empty to disable.
+	PmsgPath string
+	PmsgMax  int
 
 	newConn func() (packetConn, error)
 	conn    packetConn
@@ -275,6 +279,27 @@ func (s *Sender) Run(ctx context.Context) {
 	if s.conn != nil {
 		s.conn.Close()
 		s.conn = nil
+	}
+	s.savePmsg()
+}
+
+// savePmsg keeps what no server confirmed in pmsg, also when no server answered at all.
+func (s *Sender) savePmsg() {
+	if s.PmsgPath == "" || s.PmsgMax <= 0 {
+		return
+	}
+	var items []Item
+	if s.First != nil {
+		items = s.First.Pending() // older than the kmsg queue, pstore lines in it are skipped
+	}
+	n, err := SavePmsg(s.PmsgPath, append(items, s.Queue.Pending()...), s.PmsgMax)
+	switch {
+	case err != nil && os.IsNotExist(err):
+		// The kernel has no pmsg (no ramoops with pmsg_size), which is common.
+	case err != nil:
+		s.Log.Printf("pmsg: saved %d records: %v", n, err)
+	case n > 0:
+		s.Log.Printf("pmsg: saved %d unconfirmed records for the next boot", n)
 	}
 }
 

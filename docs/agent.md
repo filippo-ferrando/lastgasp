@@ -136,6 +136,8 @@ LASTGASP_KEY=4f1c...e9 lastgasp-agent -server 10.0.0.5:5140,10.0.0.6:5140 -hostn
 | `-memory-limit` | 64 MiB | soft Go memory limit in bytes |
 | `-stash` | /run/lastgasp/agent.stash | file that keeps unconfirmed records across agent restarts, empty to disable. Must be on tmpfs or ramfs, see [The stash](#the-stash) |
 | `-stash-size` | 8 MiB | stash size in bytes, 64 KiB to 1 GiB |
+| `-pmsg` | /dev/pmsg0 | pmsg device that keeps unconfirmed records across a warm reboot, empty to disable. See [Across a reboot](#across-a-reboot) |
+| `-pmsg-max` | 64 KiB | bytes written to `-pmsg` on stop at most, the newest records are kept. Up to 1 MiB |
 | `-version` | | print the version and exit. The agent also sends its version in every heartbeat, shown in the Hosts table |
 
 Bad values stop the agent at start with a clear message, instead of failing later.
@@ -149,8 +151,17 @@ The stash fixes this without touching a disk. Every record the agent queues is a
 - The agent refuses to use a stash file that is not on tmpfs or ramfs, logs it, and runs without one.
 - The space is reserved at start. A full `/run` disables the stash instead of killing the agent later.
 - The ring keeps the newest records. If more than `-stash-size` bytes of records wait for a confirmation, the oldest are only in the agent memory and are lost on a restart. 8 MiB holds about 50000 typical kernel lines.
-- A reboot empties `/run`, which is fine: the next boot has a new boot ID, and pstore covers the crash.
+- A reboot empties `/run`. Records still unconfirmed at a clean reboot go through pmsg instead, see below.
 - `install-agent.sh --uninstall` removes `/run/lastgasp`.
+
+### Across a reboot
+
+When the agent stops, it writes the kernel lines no server confirmed yet to `/dev/pmsg0`, also when no server answered at all. With a `ramoops` backend, the kernel keeps them in reserved RAM across a warm reboot, and the next boot finds them in `/sys/fs/pstore/pmsg-ramoops-0`. The agent reads them like other pstore files, with their original level, time and part, and the server stores those that did not arrive before, under the boot they belong to.
+
+- It needs `ramoops` with a pmsg zone, for example `ramoops.mem_address=... ramoops.mem_size=0x200000 ramoops.pmsg_size=0x20000`. EFI and ERST backends have no pmsg. Without `/dev/pmsg0` the agent writes nothing and logs nothing.
+- A cold boot (power off) loses the RAM, and so the records.
+- Only kernel lines are written, as pstore lines are still in pstore anyway.
+- In Kubernetes, the agent pod sees `/dev/pmsg0` only when it is mounted like `/dev/kmsg`.
 
 ## The systemd unit
 

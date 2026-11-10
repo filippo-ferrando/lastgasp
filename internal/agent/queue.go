@@ -216,6 +216,19 @@ func (q *Queue) Oldest() uint64 {
 	return q.at(0).seq
 }
 
+// Pending returns copies of the items no server confirmed yet, sent or not, oldest first.
+func (q *Queue) Pending() []Item {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var out []Item
+	for i := 0; i < q.n; i++ {
+		if it := q.at(i); !it.done {
+			out = append(out, *it)
+		}
+	}
+	return out
+}
+
 // Unconfirmed returns the number of items sent and not confirmed yet.
 func (q *Queue) Unconfirmed() int {
 	q.mu.Lock()

@@ -4,6 +4,7 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- The agent writes records no server confirmed to `/dev/pmsg0` when it stops (`-pmsg`, `-pmsg-max`), and the next boot sends them from pstore. Nothing changes on machines without a ramoops pmsg zone.
 - Reboots or silent incidents of 3 or more hosts within 2 minutes form a group and get one alert per target (`-group-min-hosts`, `-group-window`). The other members get the alert state `grouped`. Incidents have a new `group_id` field; the schema upgrade adds the column on start. Set `-group-min-hosts 0` to keep one alert per host.
 - New incident kind `flapping`: 3 reboots or returns from silence within 1 hour (`-flap-count`, `-flap-window`). While it is open, the reboot and silent alerts of that host are suppressed. Set `-flap-count 0` to turn it off.
 - Rules take an optional count, `name severity 10/1h regexp`: the incident opens once that many lines matched within that time. New built-in rules `mce_corrected` and `edac_ce` (warning, 10 in 1 hour) and `edac_ue` (critical). Corrected machine check lines (`Machine check events logged`) used to open a critical `mce` incident each time, now they open a warning when they pile up. Add `mce_corrected off` to the rules file to get the old behavior.

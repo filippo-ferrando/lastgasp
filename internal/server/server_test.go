@@ -268,6 +268,36 @@ func TestMultiLinePstoreMatchesKmsg(t *testing.T) {
 	}
 }
 
+func TestPmsgRecordsMatchKmsg(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	// Boot A: the second part of a long record arrives, the next record does not.
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xa}, Instance: 1, Seq: 1, Kind: wire.KindKmsg,
+		Record: wire.Record{Priority: 4, Seq: 7, TsUsec: 900, Part: 2, Parts: 2, Msg: "second half"}})
+	e.waitRecords(t, 1)
+	// The agent saved both to pmsg when it stopped. Boot B sends them from pstore.
+	path := filepath.Join(t.TempDir(), "pmsg0")
+	os.WriteFile(path, nil, 0o600)
+	items := []agent.Item{
+		{Kind: wire.KindKmsg, Rec: wire.Record{Priority: 4, Seq: 7, TsUsec: 900, Part: 2, Parts: 2, Msg: "second half"}},
+		{Kind: wire.KindKmsg, Rec: wire.Record{Priority: 0, Seq: 8, TsUsec: 950, Part: 1, Parts: 1, Msg: "never arrived"}},
+	}
+	if _, err := agent.SavePmsg(path, items, 4096); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	for i, l := range agent.ParsePstore(data) {
+		e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xb}, Instance: 2, Seq: uint64(i + 1), Kind: wire.KindPstore,
+			Record: wire.Record{Priority: l.Priority, Seq: l.Line, TsUsec: l.TsUsec, FileID: l.FileID, Part: l.Part, Parts: l.Parts, Msg: l.Msg}})
+	}
+	recs := e.waitRecords(t, 2)
+	if recs[1].Message != "never arrived" || recs[1].Source != "pstore" || recs[1].BootID != wire.FormatBootID([16]byte{0xa}) {
+		t.Fatalf("records %+v", recs)
+	}
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_records_deduplicated_total{host="node-1",source="pstore"} 1`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
 func TestBadPacketsAreCounted(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
 	b, _ := wire.Encode(kmsgPkt(1, 1, 1, 0, 0, "x"), bytes.Repeat([]byte{2}, 32))

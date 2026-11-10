@@ -17,6 +17,8 @@ import (
 type PstoreLine struct {
 	FileID uint64
 	Line   uint64
+	// Part and Parts are set for records the agent saved to pmsg, which were already split. 0 otherwise.
+	Part, Parts uint8
 	Entry
 }
 
@@ -79,6 +81,12 @@ func ParsePstore(data []byte) []PstoreLine {
 	for i, raw := range bytes.Split(data, []byte("\n")) {
 		line := strings.TrimRight(string(raw), "\r")
 		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if e, part, parts, ok := parsePmsg(line); ok {
+			out = append(out, PstoreLine{FileID: id, Line: uint64(i), Part: part, Parts: parts, Entry: e})
+			kernel = append(kernel, false)
+			prev = i
 			continue
 		}
 		e, ok := parsePstoreLine(line)

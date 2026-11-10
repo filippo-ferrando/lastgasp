@@ -36,6 +36,9 @@ type Config struct {
 	// StashPath is a file on tmpfs that keeps unconfirmed records across agent restarts, empty to disable.
 	StashPath string
 	StashSize int
+	// PmsgPath is the pmsg device that keeps unconfirmed records across a warm reboot, empty to disable.
+	PmsgPath string
+	PmsgMax  int
 }
 
 // MaxBuffer bounds -buffer, as all slots are allocated and locked in memory at start.
@@ -60,6 +63,8 @@ func (c *Config) Validate() error {
 		return errors.New("wait-ack needs heartbeats, set -heartbeat or -wait-ack=false")
 	case c.ResolveEvery < time.Second:
 		return errors.New("resolve-every must be at least 1s")
+	case c.PmsgPath != "" && (c.PmsgMax < 0 || c.PmsgMax > 1<<20):
+		return errors.New("pmsg-max must be between 0 and 1048576 bytes")
 	case c.StashPath != "" && (c.StashSize < MinStash || c.StashSize > MaxStash):
 		return fmt.Errorf("stash-size must be between %d and %d bytes", MinStash, MaxStash)
 	}
@@ -112,8 +117,14 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 			log.Printf("pstore: %v", err)
 		}
 		for _, l := range lines {
-			items = append(items, split(wire.KindPstore, l.Entry, l.Line, l.FileID)...)
 			stats.PstoreRecords.Add(1)
+			// A part saved to pmsg keeps its number, so the server can match it with the kmsg copy.
+			if l.Parts > 0 && len(l.Msg) <= maxMsg {
+				items = append(items, Item{Kind: wire.KindPstore, Rec: wire.Record{Priority: l.Priority, Seq: l.Line,
+					TsUsec: l.TsUsec, FileID: l.FileID, Part: l.Part, Parts: l.Parts, Msg: l.Msg}})
+				continue
+			}
+			items = append(items, split(wire.KindPstore, l.Entry, l.Line, l.FileID)...)
 		}
 		if len(lines) > 0 {
 			log.Printf("pstore: queued %d lines from the previous boot", len(lines))
@@ -156,6 +167,7 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 		Host: cfg.Host, BootID: bootID, Instance: randomUint64(),
 		Key: cfg.Key, Queue: queue, First: first, Resolver: res, Stats: stats, Log: log,
 		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck, ForwardSecrecy: cfg.ForwardSecrecy, Version: version.String(),
+		PmsgPath: cfg.PmsgPath, PmsgMax: cfg.PmsgMax,
 	}
 	if cfg.ForwardSecrecy && !sender.fs() {
 		log.Printf("agent: forward secrecy needs -wait-ack and -heartbeat, sending version 4 packets without it")

@@ -39,6 +39,8 @@ func main() {
 		memLimit  = flag.Int64("memory-limit", 64<<20, "soft Go memory limit in bytes")
 		stash     = flag.String("stash", "/run/lastgasp/agent.stash", "file on tmpfs that keeps unconfirmed records across agent restarts, empty to disable")
 		stashSize = flag.Int("stash-size", 8<<20, "stash size in bytes")
+		pmsg      = flag.String("pmsg", "/dev/pmsg0", "pmsg device that keeps unconfirmed records across a warm reboot, empty to disable")
+		pmsgMax   = flag.Int("pmsg-max", 64<<10, "bytes written to -pmsg on stop at most")
 		showVer   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -52,7 +54,7 @@ func main() {
 	cfg := agent.Config{
 		DNSServer: *dns, KmsgPath: *kmsg, PstoreDir: *pstore, BootIDPath: *bootID,
 		BufferSize: *buffer, Rate: *rate, Heartbeat: *heartbeat, WaitAck: *waitAck, ForwardSecrecy: *fsec, ResolveEvery: *resolve, MaxPstoreFile: 1 << 20,
-		StashPath: *stash, StashSize: *stashSize,
+		StashPath: *stash, StashSize: *stashSize, PmsgPath: *pmsg, PmsgMax: *pmsgMax,
 	}
 	for _, s := range strings.Split(*servers, ",") {
 		if s = strings.TrimSpace(s); s != "" {

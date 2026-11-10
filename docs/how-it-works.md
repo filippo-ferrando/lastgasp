@@ -30,6 +30,7 @@ The agent assumes the machine can fail in every way while it runs. Its job is to
 | Out of memory | `oom_score_adj` is -1000 and a Go memory limit is set. |
 | journald dies or hangs | `SIGPIPE` is ignored and log lines are dropped instead of blocking. |
 | Internal bug | Each worker restarts after a panic. systemd restarts the process. The encryption state is kept across a restart, so no nonce is used twice. |
+| Clean reboot | Records still unconfirmed when the agent stops are written to `/dev/pmsg0`. With ramoops, the next boot reads them from pstore and sends them. See [Across a reboot](agent.md#across-a-reboot). |
 | Agent restart or upgrade | Every queued record is also copied to a ring in a tmpfs file (`-stash`). A new run of the same boot sends the records the old run had not got confirmed. See [the stash](agent.md#the-stash). |
 | Crash and reboot | On start, pstore files (logs the kernel saved before the crash) are read and sent first, from a queue of their own, so a full buffer never drops them. The whole kernel buffer is replayed too. The server removes what it already has. |
 | Shutdown | On `SIGTERM` the agent sends what is left in its buffer for up to 2 seconds. |

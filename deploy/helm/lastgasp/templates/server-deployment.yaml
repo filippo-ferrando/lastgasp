@@ -1,5 +1,6 @@
 {{- if .Values.server.enabled }}
 {{- $s := .Values.server }}
+{{- $nc := $s.netconsole }}
 {{- if gt (int $s.replicas) 1 }}
 {{- fail "server.replicas must be 0 or 1: each replica would only see part of the packets of a host" }}
 {{- end }}
@@ -27,7 +28,7 @@ spec:
         {{- end }}
       annotations:
         # The server reads these files at start, so a change restarts it.
-        checksum/config: {{ list .Values.key $s.rules | toYaml | sha256sum }}
+        checksum/config: {{ list .Values.key $s.rules $nc.hosts | toYaml | sha256sum }}
         {{- with $s.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -82,6 +83,16 @@ spec:
             {{- if $s.requireForwardSecrecy }}
             - -require-forward-secrecy
             {{- end }}
+            - -flap-count={{ $s.incidents.flapCount }}
+            - -flap-window={{ $s.incidents.flapWindow }}
+            - -group-min-hosts={{ $s.incidents.groupMinHosts }}
+            - -group-window={{ $s.incidents.groupWindow }}
+            {{- if $nc.enabled }}
+            - -netconsole-listen=:{{ $nc.port }}
+            - -netconsole-from={{ $nc.from }}
+            - -netconsole-hosts=/etc/lastgasp/netconsole/hosts
+            - -netconsole-delay={{ $nc.delay }}
+            {{- end }}
             {{- with $s.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -105,6 +116,11 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if $nc.enabled }}
+            - name: netconsole
+              containerPort: {{ $nc.port }}
+              protocol: UDP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -139,6 +155,11 @@ spec:
             {{- if $s.rules }}
             - name: rules
               mountPath: /etc/lastgasp/rules
+              readOnly: true
+            {{- end }}
+            {{- if $nc.enabled }}
+            - name: netconsole
+              mountPath: /etc/lastgasp/netconsole
               readOnly: true
             {{- end }}
             {{- with $s.extraVolumeMounts }}
@@ -176,6 +197,11 @@ spec:
         - name: rules
           configMap:
             name: {{ include "lastgasp.fullname" . }}-rules
+        {{- end }}
+        {{- if $nc.enabled }}
+        - name: netconsole
+          configMap:
+            name: {{ include "lastgasp.fullname" . }}-netconsole
         {{- end }}
         {{- with $s.extraVolumes }}
         {{- toYaml . | nindent 8 }}

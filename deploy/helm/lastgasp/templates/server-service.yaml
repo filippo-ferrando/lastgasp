@@ -57,4 +57,37 @@ spec:
       {{- if and $svc.udp.nodePort (ne $svc.udp.type "ClusterIP") }}
       nodePort: {{ $svc.udp.nodePort }}
       {{- end }}
+{{- if .Values.server.netconsole.enabled }}
+{{- $nsvc := .Values.server.netconsole.service }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-netconsole
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  {{- with $nsvc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $nsvc.type }}
+  {{- with $nsvc.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  {{- if and $nsvc.externalTrafficPolicy (ne $nsvc.type "ClusterIP") }}
+  externalTrafficPolicy: {{ $nsvc.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "lastgasp.selectorLabels" (dict "ctx" . "component" "server") | nindent 4 }}
+  ports:
+    - name: netconsole
+      port: {{ .Values.server.netconsole.port }}
+      targetPort: netconsole
+      protocol: UDP
+      {{- if and $nsvc.nodePort (ne $nsvc.type "ClusterIP") }}
+      nodePort: {{ $nsvc.nodePort }}
+      {{- end }}
+{{- end }}
 {{- end }}

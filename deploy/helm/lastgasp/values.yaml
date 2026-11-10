@@ -60,6 +60,34 @@ server:
   # Refuse packets before version 5, which have no forward secrecy. Turn on once every agent sends version 5.
   requireForwardSecrecy: false
 
+  # Incidents of many hosts at once and hosts that keep rebooting, see docs/incidents-and-alerts.md.
+  incidents:
+    # Reboots or returns from silence within flapWindow that open a flapping incident, 0 to disable.
+    flapCount: 3
+    flapWindow: 1h
+    # Hosts that reboot or go silent within groupWindow to share one alert, 0 to disable.
+    groupMinHosts: 3
+    groupWindow: 2m
+
+  # Kernel netconsole lines, so a panic arrives while it happens. See docs/kubernetes.md#netconsole.
+  netconsole:
+    enabled: false
+    port: 6666
+    # Addresses or CIDR prefixes allowed to send, comma separated, like the node network "192.168.10.0/24". Required.
+    from: ""
+    # "ip host" lines naming each sender, with the host name its agent uses (the node name). Required.
+    hosts: ""
+    # Time a line waits, so the agent copy of it wins.
+    delay: 10s
+    # Nodes send to a node address. Local keeps their source address, which names the host: send to
+    # the node running the server, pinned with server.nodeSelector.
+    service:
+      type: NodePort
+      nodePort: null
+      loadBalancerIP: ""
+      externalTrafficPolicy: Local
+      annotations: {}
+
   # More server flags, like alert targets: ["-alert-webhook=https://...", "-alert-format=slack"]
   extraArgs: []
   env: []
@@ -146,6 +174,23 @@ agent:
     keyDir: /var/lib/lastgasp
   # Mount /dev/kmsg from the node. Turn off when a device plugin adds the device, see docs/kubernetes.md.
   kmsgHostPath: true
+  # Keep unconfirmed records in /dev/pmsg0 across a warm reboot. Needs ramoops with pmsg_size on every node,
+  # as the pod does not start without the device. Non privileged agents also need the device allowed.
+  pmsg: false
+  # Send userspace lines from the node journal. Uses the agent image with journalctl, which must be as new
+  # as the systemd of the nodes. Needs a server of v0.1.6 or newer. See docs/kubernetes.md#journal.
+  journal:
+    enabled: false
+    # Lines of this level and more severe: emerg, alert, crit, err, warning, notice, info, debug.
+    priority: warning
+    # Lines per second at most, 0 for no limit.
+    rate: 200
+    # The node keeps its journal on disk in /var/log/journal. False: only /run/log/journal is read.
+    persistent: true
+    image:
+      repository: git.fferrando.cc/rdfilippo/lastgasp-agent-journal
+      # Default: the chart appVersion.
+      tag: ""
   # More agent flags, like ["-buffer=32768", "-rate=1000"].
   extraArgs: []
   env: []

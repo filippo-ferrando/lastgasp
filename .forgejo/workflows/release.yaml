@@ -117,7 +117,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          for part in server agent; do
+          for part in server agent agent-journal; do
             image=$(echo "$REGISTRY/$REPOSITORY-$part" | tr '[:upper:]' '[:lower:]')
             {
               echo "$part<<EOF"
@@ -154,6 +154,18 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
           tags: ${{ steps.tags.outputs.agent }}
+
+      - name: Build and push agent image with journalctl
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: agent-journal
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: ${{ steps.tags.outputs.agent-journal }}
 
   # The chart gets the version of the tag, and its default images are the ones pushed above.
   chart:

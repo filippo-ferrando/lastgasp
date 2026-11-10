@@ -4,7 +4,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X lastgasp/internal/version.Version=$(VERSION)
 ARCHES := amd64 arm64 arm
 
-.PHONY: all agent server test test-deploy test-examples test-chart image image-agent dist clean
+.PHONY: all agent server test test-deploy test-examples test-chart image image-agent image-agent-journal dist clean
 
 all: agent server
 
@@ -33,6 +33,9 @@ image:
 
 image-agent:
 	docker build --build-arg VERSION=$(VERSION) --target agent -t lastgasp-agent:$(VERSION) -t lastgasp-agent:latest .
+
+image-agent-journal:
+	docker build --build-arg VERSION=$(VERSION) --target agent-journal -t lastgasp-agent-journal:$(VERSION) -t lastgasp-agent-journal:latest .
 
 # Release files: agent and server for each architecture, the installer of this version, units, checksums.
 dist:

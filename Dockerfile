@@ -18,6 +18,13 @@ FROM gcr.io/distroless/static-debian12 AS agent
 COPY --from=build /out/lastgasp-agent /usr/local/sbin/lastgasp-agent
 ENTRYPOINT ["/usr/local/sbin/lastgasp-agent"]
 
+# The agent with journalctl, for -journal in Kubernetes. journalctl must read the journal files of the node,
+# so it must be as new as the systemd of the nodes. Debian 13 has systemd 257.
+FROM debian:13-slim AS agent-journal
+RUN apt-get update && apt-get install -y --no-install-recommends systemd && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/lastgasp-agent /usr/local/sbin/lastgasp-agent
+ENTRYPOINT ["/usr/local/sbin/lastgasp-agent"]
+
 FROM gcr.io/distroless/static-debian12:nonroot AS server
 COPY --from=build /out/lastgasp-server /usr/local/bin/lastgasp-server
 # Default SQLite location, used when no postgres:// URL is given.

@@ -9,3 +9,15 @@ data:
   rules: |
     {{- .Values.server.rules | nindent 4 }}
 {{- end }}
+{{- if and .Values.server.enabled .Values.server.netconsole.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lastgasp.fullname" . }}-netconsole
+  labels:
+    {{- include "lastgasp.labels" . | nindent 4 }}
+data:
+  hosts: |
+    {{- .Values.server.netconsole.hosts | nindent 4 }}
+{{- end }}

@@ -5,3 +5,10 @@
 {{- if and .Values.server.database.passwordSecret.name (not .Values.server.database.url) }}
 {{- fail "server.database.passwordSecret is set but server.database.url is empty" }}
 {{- end }}
+{{- $nc := .Values.server.netconsole }}
+{{- if and .Values.server.enabled $nc.enabled (or (not $nc.from) (not $nc.hosts)) }}
+{{- fail "server.netconsole needs from and hosts: netconsole lines are plain text, only listed senders are taken" }}
+{{- end }}
+{{- if and .Values.agent.enabled .Values.agent.journal.enabled (not (has .Values.agent.journal.priority (list "emerg" "alert" "crit" "err" "warning" "notice" "info" "debug"))) }}
+{{- fail "agent.journal.priority must be one of emerg, alert, crit, err, warning, notice, info, debug" }}
+{{- end }}

@@ -1,6 +1,7 @@
 {{- if .Values.agent.enabled }}
 {{- $a := .Values.agent }}
 {{- $enroll := $a.enroll.tokenSecret.name }}
+{{- $journal := $a.journal.enabled }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -80,7 +81,7 @@ spec:
       {{- end }}
       containers:
         - name: agent
-          image: {{ include "lastgasp.image" (dict "ctx" . "image" $a.image) }}
+          image: {{ include "lastgasp.image" (dict "ctx" . "image" (ternary $a.journal.image $a.image $journal)) }}
           imagePullPolicy: {{ $a.image.pullPolicy }}
           args:
             - -server={{ include "lastgasp.agentServer" . }}
@@ -101,6 +102,16 @@ spec:
             {{- end }}
             {{- if not $a.forwardSecrecy }}
             - -forward-secrecy=false
+            {{- end }}
+            {{- if $a.pmsg }}
+            - -pmsg=/dev/pmsg0
+            {{- else }}
+            - -pmsg=
+            {{- end }}
+            {{- if $journal }}
+            - -journal
+            - -journal-priority={{ $a.journal.priority }}
+            - -journal-rate={{ $a.journal.rate }}
             {{- end }}
             {{- with $a.extraArgs }}
             {{- toYaml . | nindent 12 }}
@@ -132,6 +143,24 @@ spec:
             - name: stash
               mountPath: /run/lastgasp
             {{- end }}
+            {{- if $a.pmsg }}
+            - name: pmsg
+              mountPath: /dev/pmsg0
+            {{- end }}
+            {{- if $journal }}
+            # journalctl reads the journal of this machine ID, from these two places.
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+            - name: journal-run
+              mountPath: /run/log/journal
+              readOnly: true
+            {{- if $a.journal.persistent }}
+            - name: journal-var
+              mountPath: /var/log/journal
+              readOnly: true
+            {{- end }}
+            {{- end }}
             - name: key
               mountPath: {{ ternary "/var/lib/lastgasp" "/etc/lastgasp" (not (empty $enroll)) }}
               readOnly: true
@@ -154,6 +183,30 @@ spec:
           hostPath:
             path: /run/lastgasp
             type: DirectoryOrCreate
+        {{- end }}
+        {{- if $a.pmsg }}
+        # CharDevice: a missing device stops the pod, instead of a directory made in its place.
+        - name: pmsg
+          hostPath:
+            path: /dev/pmsg0
+            type: CharDevice
+        {{- end }}
+        {{- if $journal }}
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        - name: journal-run
+          hostPath:
+            path: /run/log/journal
+            type: Directory
+        {{- if $a.journal.persistent }}
+        # Directory, not DirectoryOrCreate: a new /var/log/journal would make journald keep logs on disk.
+        - name: journal-var
+          hostPath:
+            path: /var/log/journal
+            type: Directory
+        {{- end }}
         {{- end }}
         {{- if $enroll }}
         # Kept on the node disk, so a reboot does not need a new enrollment.

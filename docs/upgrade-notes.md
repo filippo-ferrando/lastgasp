@@ -4,6 +4,7 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- Helm chart: new values `server.incidents.*`, `server.netconsole.*`, `agent.pmsg` and `agent.journal.*`, all off apart from the incident defaults. A new image, `lastgasp-agent-journal`, is used with `agent.journal.enabled`. See [kubernetes.md](kubernetes.md).
 - Agents can send userspace lines from journald with `-journal` (off by default). Upgrade the server before turning it on: older servers refuse these packets. New incident kind `journal_error` and journal rules `coredump` and `unit_failed`. Rules files take `@journal` after the severity.
 - The server can take extended netconsole lines (`-netconsole-listen`, `-netconsole-from`, `-netconsole-hosts`), so a panic arrives during the panic, without pstore. Records get the new source `netconsole`. See [server.md](server.md#netconsole).
 - The agent writes records no server confirmed to `/dev/pmsg0` when it stops (`-pmsg`, `-pmsg-max`), and the next boot sends them from pstore. Nothing changes on machines without a ramoops pmsg zone.

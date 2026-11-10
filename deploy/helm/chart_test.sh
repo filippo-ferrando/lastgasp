@@ -58,6 +58,34 @@ hasnot "$d" "retain-bytes"
 render size --set server.retainBytes=4GiB
 has "$TMP/size" "- -retain-bytes=4GiB"
 
+# New features are off by default, apart from the incident flags.
+for s in "netconsole" "journal" "path: /dev/pmsg0"; do hasnot "$d" "$s"; done
+has "$d" "- -pmsg="
+has "$d" "- -flap-count=3"
+has "$d" "- -group-min-hosts=3"
+
+# Netconsole: a UDP service that keeps source addresses, and the hosts file.
+render nc --set server.netconsole.enabled=true --set server.netconsole.from=192.168.10.0/24 \
+	--set-string 'server.netconsole.hosts=192.168.10.100 magi'
+for s in "name: lg-lastgasp-netconsole" "externalTrafficPolicy: Local" "type: NodePort" "- -netconsole-listen=:6666" \
+	"- -netconsole-from=192.168.10.0/24" "- -netconsole-hosts=/etc/lastgasp/netconsole/hosts" "192.168.10.100 magi" \
+	"containerPort: 6666"; do
+	has "$TMP/nc" "$s"
+done
+refuse "server.netconsole needs from and hosts" --set server.netconsole.enabled=true
+
+# pmsg and journal: the device, the journal image and the node journal.
+render jr --set agent.pmsg=true --set agent.journal.enabled=true --set agent.journal.priority=err --set agent.journal.persistent=false \
+	--set agent.enroll.tokenSecret.name=join
+for s in "- -pmsg=/dev/pmsg0" "path: /dev/pmsg0" "type: CharDevice" "lastgasp-agent-journal:" "- -journal" \
+	"- -journal-priority=err" "path: /etc/machine-id" "path: /run/log/journal"; do
+	has "$TMP/jr" "$s"
+done
+hasnot "$TMP/jr" "path: /var/log/journal"
+# The enroll init container keeps the plain agent image.
+sed -n '/name: enroll/,/args:/p' "$TMP/jr" | grep -q "lastgasp-agent:" || fail "enroll container must use the agent image"
+refuse "agent.journal.priority must be one of" --set agent.journal.enabled=true --set agent.journal.priority=loud
+
 # PostgreSQL: no volume claim, password from a secret.
 render pg --set server.database.url='postgres://lastgasp@db:5432/lastgasp' --set server.database.passwordSecret.name=pg
 has "$TMP/pg" "- -db=postgres://lastgasp@db:5432/lastgasp"
@@ -113,7 +141,9 @@ CGO_ENABLED=0 go build -o "$TMP/agent" ./cmd/lastgasp-agent
 "$TMP/agent" -h 2>"$TMP/agent.help" || true
 all="--set server.publicURL=https://lg.example --set server.agentAddress=10.0.0.5:5140 --set server.auth.existingSecret=auth
 	--set server.rules=x --set metrics.enabled=true --set metrics.requireAuth=true --set metrics.tokenSecret.name=tok
-	--set agent.pstore=false --set agent.stash=false --set agent.forwardSecrecy=false --set server.requireForwardSecrecy=true"
+	--set agent.pstore=false --set agent.stash=false --set agent.forwardSecrecy=false --set server.requireForwardSecrecy=true
+	--set server.netconsole.enabled=true --set server.netconsole.from=10.0.0.0/8 --set server.netconsole.hosts=x
+	--set agent.pmsg=true --set agent.journal.enabled=true --set server.retainBytes=1G"
 for part in server agent; do
 	# shellcheck disable=SC2086
 	render "$part.yaml" --show-only "templates/$part-$([ $part = server ] && echo deployment || echo daemonset).yaml" $all

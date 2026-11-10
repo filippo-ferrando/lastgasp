@@ -52,6 +52,8 @@ Machines outside the cluster can use their own keys: add `host hexkey` lines wit
 | `privileged: true` | the container runtime allows `/dev/kmsg` only to privileged containers. It also gives `CAP_SYSLOG` and `CAP_IPC_LOCK` for reading the log and locking memory |
 | hostPath `/dev/kmsg`, read only | the kernel log of the node. Left out with `agent.kmsgHostPath: false` |
 | hostPath `/sys/fs/pstore`, read only | crash logs from the previous boot. Turn off with `agent.pstore: false` on nodes without pstore, or the pod does not start |
+| hostPath `/dev/pmsg0`, with `agent.pmsg` | unconfirmed records across a warm reboot, see [pmsg](#pmsg) |
+| hostPath journal, with `agent.journal.enabled` | userspace lines, see [Journal](#journal) |
 | hostPath `/run/lastgasp` | the stash. `/run` on the node is tmpfs, so unconfirmed records survive an agent restart or upgrade but not a reboot |
 | `-hostname=$(NODE_NAME)` | logs are grouped by node name, not by pod name |
 | `priorityClassName: system-node-critical` | the agent is scheduled first and is the last one the OOM killer picks. It also sets its own `oom_score_adj` to -1000 |
@@ -112,6 +114,9 @@ If `systemd-pstore` runs on the nodes, it moves crash files out of `/sys/fs/psto
 | `server.rules` | | incident rules file content |
 | `server.publicURL` | | `-public-url`, for links in alerts |
 | `server.requireForwardSecrecy` | false | `-require-forward-secrecy`: refuse packets before version 5. Turn on once every agent, in and outside the cluster, sends version 5 |
+| `server.incidents.flapCount`, `flapWindow` | 3, 1h | `-flap-count`, `-flap-window`: a flapping incident for nodes that keep rebooting |
+| `server.incidents.groupMinHosts`, `groupWindow` | 3, 2m | `-group-min-hosts`, `-group-window`: one alert when many nodes reboot or go silent at once |
+| `server.netconsole.*` | off | kernel netconsole lines, see [Netconsole](#netconsole) |
 | `server.extraArgs` | | more server flags, like `-alert-webhook=...` |
 | `server.ingress.*` | off | an Ingress to the web UI. Set `-auth-proxy-header` and `-auth-trusted-proxies` in `extraArgs` for real client addresses |
 
@@ -121,6 +126,59 @@ The auth file, made with `lastgasp-server user` (see [web-ui-and-api.md](web-ui-
 docker run --rm -i git.fferrando.cc/rdfilippo/lastgasp-server user alice admin < password.txt > auth
 kubectl -n lastgasp create secret generic lastgasp-auth --from-file=auth
 ```
+
+## Netconsole
+
+The kernel netconsole sends the panic of a node while it happens, when the agent is already stopped (see [server.md](server.md#netconsole)). The nodes send plain UDP from their own address, so the server must see that address:
+
+```yaml
+server:
+  # Netconsole needs a fixed target: pin the server to one node.
+  nodeSelector:
+    kubernetes.io/hostname: casper.example.net
+  netconsole:
+    enabled: true
+    from: 192.168.10.0/24
+    hosts: |
+      192.168.10.100 magi.example.net
+      192.168.10.102 balthazar.example.net
+      192.168.10.103 caelium.example.net
+    service:
+      type: NodePort
+      nodePort: 30666
+      externalTrafficPolicy: Local
+```
+
+On each node, send to the address of the node running the server and the node port, in extended mode:
+
+```sh
+echo "netconsole" > /etc/modules-load.d/netconsole.conf
+echo "options netconsole netconsole=+@/eth0,30666@192.168.10.101/" > /etc/modprobe.d/netconsole.conf
+modprobe netconsole
+```
+
+- `externalTrafficPolicy: Local` keeps the source address, which names the node in `hosts`. With `Cluster`, kube-proxy may replace it and the lines are refused.
+- The host names in `hosts` are the node names, as the agents use them.
+- The node that runs the server cannot send to itself through netconsole, so it is left out of `hosts`.
+- A NetworkPolicy on the namespace must allow UDP to the netconsole port from the node network.
+
+## Journal
+
+`agent.journal.enabled` sends userspace lines from the journal of each node (see [agent.md](agent.md#userspace-logs)). The agent then uses the `lastgasp-agent-journal` image, which has `journalctl`, and reads the node journal read only:
+
+| Mount | Why |
+| --- | --- |
+| `/etc/machine-id` | journalctl reads the journal of this machine |
+| `/run/log/journal` | the journal kept in RAM |
+| `/var/log/journal` | the journal kept on disk. Set `agent.journal.persistent: false` on nodes without it, or the pod does not start |
+
+- `journalctl` must be as new as the systemd of the nodes, or it cannot read their journal files. The image has the journalctl of Debian 13 (systemd 257).
+- journalctl memory counts against the agent pod. Give the agent about 64 MiB more with `agent.resources.limits.memory`.
+- The server must be v0.1.6 or newer.
+
+## pmsg
+
+`agent.pmsg: true` mounts `/dev/pmsg0` from the node, so records still unconfirmed when a node reboots are sent again by the next boot (see [agent.md](agent.md#across-a-reboot)). Every node needs ramoops with a pmsg zone, or the pod does not start. A non privileged agent also needs the device allowed, through a device plugin like for `/dev/kmsg`; without it, the agent logs that it cannot write and goes on.
 
 ## Prometheus
 
@@ -152,4 +210,4 @@ The secret needs `agent.key` only, and the server needs a matching `*` line (or 
 
 ## Upgrades
 
-`helm upgrade` updates the server and the agents together. Agents hold records while the server restarts, and the DaemonSet replaces them one node at a time. The old agent pod stops before the new one starts, so the new one sends the records still in the stash.
+`helm upgrade` updates the server and the agents together. Read [upgrade-notes.md](upgrade-notes.md) first: new features stay off until their values are set. Agents hold records while the server restarts, and the DaemonSet replaces them one node at a time. The old agent pod stops before the new one starts, so the new one sends the records still in the stash.

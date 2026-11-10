@@ -244,6 +244,30 @@ func TestDedupAcrossRestartsAndPstore(t *testing.T) {
 	}
 }
 
+func TestMultiLinePstoreMatchesKmsg(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	// Boot A sends a two-line record as /dev/kmsg shows it, then crashes.
+	k, err := agent.ParseKmsg([]byte("4,7,2000000,-;WARNING: at foo\\x0a\\x09bar+0x10\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xa}, Instance: 1, Seq: 1, Kind: wire.KindKmsg,
+		Record: wire.Record{Priority: k.Priority, Seq: k.Seq, TsUsec: k.TsUsec, Part: 1, Parts: 1, Msg: k.Msg}})
+	e.waitRecords(t, 1)
+	// Boot B finds the same record in pstore, written as two lines with the same prefix.
+	for i, l := range agent.ParsePstore([]byte("<4>[    2.000000] WARNING: at foo\n<4>[    2.000000] \tbar+0x10\n")) {
+		e.send(t, &wire.Packet{Host: "node-1", BootID: [16]byte{0xb}, Instance: 2, Seq: uint64(i + 1), Kind: wire.KindPstore,
+			Record: wire.Record{Priority: l.Priority, Seq: l.Line, TsUsec: l.TsUsec, FileID: l.FileID, Part: 1, Parts: 1, Msg: l.Msg}})
+	}
+	e.send(t, kmsgPkt(0xb, 2, 9, 0, 1, "marker"))
+	if recs := e.waitRecords(t, 2); recs[0].Source != "kmsg" || recs[1].Message != "marker" {
+		t.Fatalf("records %+v", recs)
+	}
+	if m := e.get(t, "/metrics"); !strings.Contains(m, `lastgasp_records_deduplicated_total{host="node-1",source="pstore"} 1`) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
 func TestBadPacketsAreCounted(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
 	b, _ := wire.Encode(kmsgPkt(1, 1, 1, 0, 0, "x"), bytes.Repeat([]byte{2}, 32))

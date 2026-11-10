@@ -152,7 +152,6 @@ For key file lines:
 
 - Records are sent again only while they are still in the agent buffer, or in the stash after an agent restart. A long outage at full rate can still lose records, and they show up as missing.
 - On PostgreSQL, `-retain-bytes` counts the record rows only, estimated from the newest rows. Indexes and space waiting for vacuum come on top.
-- A multi-line kernel message appears as one record in kmsg and as several lines in pstore, so those lines are not deduplicated against each other.
 - Records recovered from the stash are sent by the new agent run, so the missing packets of the old run stay counted as missing.
 - Alerts are sent at least once. A server stopped right after sending an alert, before saving that it did, sends it again after the restart.
 - One server process reads one UDP socket. Several `-server` addresses send every packet to every server: that adds redundancy, not capacity.

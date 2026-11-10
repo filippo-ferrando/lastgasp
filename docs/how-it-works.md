@@ -143,3 +143,5 @@ The same line can arrive more than once: an agent restart replays the kernel buf
 | Same pstore file sent again after later reboots | host, file content hash, line number, part |
 
 A pstore file belongs to the boot seen just before the boot that sent it, and keeps that boot.
+
+The kernel writes a record of several lines to pstore as several lines with the same `<level>[time]` prefix. The agent joins them back into one record, and escapes control characters, backslashes and non-ASCII bytes as `\xNN`, as `/dev/kmsg` does, so the pstore copy of a record has the same text as the kmsg copy.

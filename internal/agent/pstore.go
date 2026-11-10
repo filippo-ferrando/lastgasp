@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -68,41 +69,74 @@ func FileID(data []byte) uint64 {
 }
 
 // ParsePstore splits a pstore file into lines like "<6>[    1.234567] message".
+// The kernel repeats the prefix on each line of a multi-line record, so such lines are joined back
+// and escaped like /dev/kmsg does, which lets the server match them with the kmsg copy.
 func ParsePstore(data []byte) []PstoreLine {
 	id := FileID(data)
 	var out []PstoreLine
+	kernel := []bool{} // whether out[n] has the "<N>[ts]" prefix of a kernel record
+	prev := -2         // file line number of the last line added to out
 	for i, raw := range bytes.Split(data, []byte("\n")) {
 		line := strings.TrimRight(string(raw), "\r")
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		e := parsePstoreLine(line)
-		out = append(out, PstoreLine{FileID: id, Line: uint64(i), Entry: e})
+		e, ok := parsePstoreLine(line)
+		n := len(out) - 1
+		if ok && prev == i-1 && kernel[n] && out[n].Priority == e.Priority && out[n].TsUsec == e.TsUsec {
+			out[n].Msg += "\n" + e.Msg
+		} else {
+			out = append(out, PstoreLine{FileID: id, Line: uint64(i), Entry: e})
+			kernel = append(kernel, ok)
+		}
+		prev = i
+	}
+	for n := range out {
+		if kernel[n] {
+			out[n].Msg = escapeKmsg(out[n].Msg)
+		}
 	}
 	return out
 }
 
-func parsePstoreLine(line string) Entry {
-	e := Entry{Priority: defaultPriority, Msg: line}
+// escapeKmsg writes control bytes, bytes above 126 and backslashes as \xNN, as /dev/kmsg shows them.
+func escapeKmsg(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < ' ' || c >= 127 || c == '\\' {
+			fmt.Fprintf(&b, "\\x%02x", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// parsePstoreLine reads the optional "<N>" and "[ts]" prefixes. ok tells that both were there.
+func parsePstoreLine(line string) (e Entry, ok bool) {
+	e = Entry{Priority: defaultPriority, Msg: line}
 	rest := line
+	hasPrio := false
 	if strings.HasPrefix(rest, "<") {
 		if end := strings.IndexByte(rest, '>'); end > 1 {
 			if p, err := strconv.ParseUint(rest[1:end], 10, 16); err == nil {
 				e.Priority = uint16(p)
 				rest = rest[end+1:]
+				hasPrio = true
 			}
 		}
 	}
 	if strings.HasPrefix(rest, "[") {
 		if end := strings.IndexByte(rest, ']'); end > 0 {
-			if ts, ok := parseTimestamp(rest[1:end]); ok {
+			if ts, tsOK := parseTimestamp(rest[1:end]); tsOK {
 				e.TsUsec = ts
 				rest = strings.TrimPrefix(rest[end+1:], " ")
+				ok = hasPrio
 			}
 		}
 	}
 	e.Msg = rest
-	return e
+	return e, ok
 }
 
 // parseTimestamp reads "   12.345678" as microseconds.

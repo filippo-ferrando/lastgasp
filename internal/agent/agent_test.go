@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -111,6 +112,29 @@ func TestParsePstore(t *testing.T) {
 	}
 	if lines[0].FileID != FileID(data) || FileID(data) == FileID([]byte("other")) {
 		t.Fatal("file id must depend only on content")
+	}
+}
+
+func TestParsePstoreJoinsMultiLineRecords(t *testing.T) {
+	// One record printed with two lines, then one with a tab, a backslash and UTF-8, as /dev/kmsg escapes them.
+	data := []byte("<4>[    2.000000] first line\n<4>[    2.000000] second\n" +
+		"<4>[    2.000001] tab\there \\ caf\u00e9\n" +
+		"<4>[    2.000002] before an empty line\n\n<4>[    2.000002] not joined\n" +
+		"plain\nplain again\n")
+	lines := ParsePstore(data)
+	var got []string
+	for _, l := range lines {
+		got = append(got, fmt.Sprint(l.Line, ":", l.Msg))
+	}
+	want := []string{`0:first line\x0asecond`, `2:tab\x09here \x5c caf\xc3\xa9`, "3:before an empty line", "5:not joined",
+		"6:plain", "7:plain again"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	// The joined record reads like its /dev/kmsg copy.
+	k, err := ParseKmsg([]byte("4,9,2000000,-;first line\\x0asecond\n"))
+	if err != nil || k.Msg != lines[0].Msg || k.TsUsec != lines[0].TsUsec || k.Priority != lines[0].Priority {
+		t.Fatalf("kmsg %+v, pstore %+v", k, lines[0])
 	}
 }
 

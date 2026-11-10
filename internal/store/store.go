@@ -537,6 +537,36 @@ func (s *Store) TrimRecords(ctx context.Context, host string, keep int) (int64, 
 	return s.deleteRecords(ctx, "id <= ?", last)
 }
 
+// RecordsSize estimates the bytes and the number of live records.
+// SQLite counts the pages in use. PostgreSQL counts row data only, as deleted rows keep their space until vacuum.
+func (s *Store) RecordsSize(ctx context.Context) (bytes, rows int64, err error) {
+	if s.postgres {
+		err = s.db.QueryRowContext(ctx, `SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables
+			WHERE relid = 'records'::regclass`).Scan(&rows)
+		if err == sql.ErrNoRows {
+			rows, err = 0, nil
+		}
+		if err != nil || rows == 0 {
+			return 0, rows, err
+		}
+		// The average row size comes from the newest rows, which look like the ones still to come.
+		var avg float64
+		err = s.db.QueryRowContext(ctx, `SELECT COALESCE(AVG(pg_column_size(r.*)), 0) FROM
+			(SELECT * FROM records ORDER BY id DESC LIMIT 1000) r`).Scan(&avg)
+		return int64(avg * float64(rows)), rows, err
+	}
+	var pages, free, size int64
+	for q, v := range map[string]*int64{"PRAGMA page_count": &pages, "PRAGMA freelist_count": &free, "PRAGMA page_size": &size} {
+		if err = s.db.QueryRowContext(ctx, q).Scan(v); err != nil {
+			return 0, 0, err
+		}
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records`).Scan(&rows); err != nil {
+		return 0, 0, err
+	}
+	return (pages - free) * size, rows, nil
+}
+
 // RecordHosts lists the hosts that may have records.
 func (s *Store) RecordHosts(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT host FROM boots ORDER BY host`)

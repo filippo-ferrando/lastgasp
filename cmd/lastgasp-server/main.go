@@ -42,6 +42,7 @@ func main() {
 		retainInfo = flag.Duration("retain-info", 0, "delete records of level info and debug older than this, 0 to use -retain only")
 		retainRecs = flag.Int("retain-records", 0, "keep at most this many records in total, oldest deleted first, 0 for no limit")
 		retainHost = flag.Int("retain-host-records", 0, "keep at most this many records per host, oldest deleted first, 0 for no limit")
+		retainSize = flag.String("retain-bytes", "0", "keep the records under this size (for example 20GiB), oldest deleted first, 0 for no limit")
 
 		rulesFile    = flag.String("rules", "", "file with extra incident rules (\"name severity regexp\" or \"name off\")")
 		silentAfter  = flag.Duration("silent-after", 2*time.Minute, "time without packets before a silent incident is opened, 0 to disable")
@@ -101,6 +102,10 @@ func main() {
 		fail("start", errors.New("-session-ttl must be at least 1m"))
 	case *ctxLines < 1 || *ctxLines > 10000:
 		fail("start", errors.New("-incident-context must be between 1 and 10000"))
+	}
+	maxBytes, err := server.ParseSize(*retainSize)
+	if err != nil {
+		fail("start", fmt.Errorf("-retain-bytes: %w", err))
 	}
 	trusted, err := server.ParsePrefixes(*authTrusted)
 	if err != nil {
@@ -205,7 +210,7 @@ func main() {
 	self := &server.SelfCheck{Detector: det, Checks: server.ServerChecks(metrics, im), Every: 10 * time.Second}
 	workers.Go(func() { self.Run(ctx) })
 	r := &server.Retention{Store: st, Tracker: tr, Detector: det, Metrics: metrics, Log: log, Age: *retain,
-		InfoAge: *retainInfo, MaxRecords: *retainRecs, MaxHostRecords: *retainHost, Every: 10 * time.Minute}
+		InfoAge: *retainInfo, MaxRecords: *retainRecs, MaxHostRecords: *retainHost, MaxBytes: maxBytes, Every: 10 * time.Minute}
 	if r.Enabled() {
 		workers.Go(func() { r.Run(ctx) })
 	}

@@ -61,6 +61,9 @@ spec:
             {{- with $s.retain }}
             - -retain={{ . }}
             {{- end }}
+            {{- with $s.retainBytes }}
+            - -retain-bytes={{ . }}
+            {{- end }}
             {{- with $s.publicURL }}
             - -public-url={{ . }}
             {{- end }}

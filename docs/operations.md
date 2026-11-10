@@ -137,7 +137,7 @@ For key file lines:
 | Crash shows up as reboot | No pstore backend on the host, and nothing critical was sent before the crash |
 | `429 Too Many Requests` in the UI | Too many failed logins from this address. Wait for `Retry-After` |
 | Alerts not sent | `lastgasp_alerts_total{result="failed"}`, the server log (`alert` lines), the target `min` severity, and the rate limit (`suppressed` in the UI) |
-| Database file keeps growing | Set `-retain`, `-retain-info` or `-retain-records`. SQLite reuses freed space but does not shrink the file |
+| Database file keeps growing | Set `-retain-bytes`, `-retain`, `-retain-info` or `-retain-records`. SQLite reuses freed space but does not shrink the file |
 
 ## Security notes
 
@@ -151,7 +151,7 @@ For key file lines:
 ## Known limits
 
 - Records are sent again only while they are still in the agent buffer, or in the stash after an agent restart. A long outage at full rate can still lose records, and they show up as missing.
-- Retention limits count records, not bytes. Size the record limits from the average record size of the database.
+- On PostgreSQL, `-retain-bytes` counts the record rows only, estimated from the newest rows. Indexes and space waiting for vacuum come on top.
 - A multi-line kernel message appears as one record in kmsg and as several lines in pstore, so those lines are not deduplicated against each other.
 - Records recovered from the stash are sent by the new agent run, so the missing packets of the old run stay counted as missing.
 - Alerts are sent at least once. A server stopped right after sending an alert, before saving that it did, sends it again after the restart.

@@ -4,6 +4,7 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- New `-retain-bytes` flag (Helm `server.retainBytes`): keeps the records under a size such as `20GiB`.
 - An ack lists up to 64 missing ranges instead of 32, so heavy loss is repaired in half the heartbeats. The server sends 64 only to agents of v0.1.6 or newer (development builds get 32), so agents and server can be upgraded in any order.
 - Helm chart: the `image.digest` values are removed. Images are pulled by tag, the chart appVersion by default.
 

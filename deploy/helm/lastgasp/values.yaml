@@ -27,6 +27,8 @@ server:
 
   # Delete data older than this, "0" keeps everything. See docs/server.md for the other limits.
   retain: 720h
+  # Keep the records under this size, for example 4GiB. Empty: no size limit.
+  retainBytes: ""
   # UI address used for links in alerts.
   publicURL: ""
   # host:port shown in the agent install commands of the UI, for machines outside the cluster.

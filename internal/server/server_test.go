@@ -891,6 +891,46 @@ func TestRetentionRecordLimits(t *testing.T) {
 	}
 }
 
+func TestRetentionByteLimit(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	for i := uint64(1); i <= 400; i++ {
+		e.send(t, kmsgPkt(1, 1, i, i, i, fmt.Sprint(i, " ", strings.Repeat("x", 800))))
+	}
+	e.waitRecords(t, 400)
+	size, _, err := e.st.RecordsSize(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Retention{Store: e.st, Tracker: e.tr, Metrics: e.metrics, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxBytes: size / 2}
+	if err := r.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := e.st.Query(context.Background(), store.Filter{MaxLevel: -1, Limit: 1000})
+	if len(all) == 0 || len(all) > 200 || !strings.HasPrefix(all[0].Message, "400 ") {
+		t.Fatalf("%d records left", len(all))
+	}
+	if after, _, _ := e.st.RecordsSize(context.Background()); after > size/2 {
+		t.Fatalf("size %d, limit %d", after, size/2)
+	}
+	if m := e.get(t, "/metrics"); !strings.Contains(m, fmt.Sprintf(`lastgasp_retention_deleted_total{table="records"} %d`, 400-len(all))) {
+		t.Fatalf("metrics:\n%s", m)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for v, want := range map[string]int64{"0": 0, "500": 500, "1K": 1 << 10, "2KiB": 2 << 10, "3MB": 3 << 20, "20GiB": 20 << 30, "1T": 1 << 40} {
+		if got, err := ParseSize(v); err != nil || got != want {
+			t.Errorf("%q: got %d %v, want %d", v, got, err, want)
+		}
+	}
+	for _, v := range []string{"", "-1", "GiB", "1X", "1.5G", "99999999999T"} {
+		if _, err := ParseSize(v); err == nil {
+			t.Errorf("%q accepted", v)
+		}
+	}
+}
+
 func TestSelfCheckOpensServerIncident(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
 	sc := &SelfCheck{Detector: e.det, Checks: ServerChecks(e.metrics, incident.NewMetrics(prometheus.NewRegistry()))}

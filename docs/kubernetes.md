@@ -104,6 +104,7 @@ If `systemd-pstore` runs on the nodes, it moves crash files out of `/sys/fs/psto
 | --- | --- | --- |
 | `server.replicas` | 1 | 0 or 1. The server keeps per-host state in memory, so a second replica would see half of the packets of each host and report false gaps and silent hosts |
 | `server.retain` | 720h | `-retain` |
+| `server.retainBytes` | | `-retain-bytes`, for example `4GiB`. Keep it below the volume size |
 | `server.database.url` | | a `postgres://` URL. Empty: SQLite on the volume |
 | `server.database.passwordSecret` | | secret and key passed as `PGPASSWORD` |
 | `server.persistence.*` | 5Gi, ReadWriteOnce | the SQLite volume |

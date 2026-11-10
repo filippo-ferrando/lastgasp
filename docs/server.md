@@ -143,6 +143,7 @@ More compose setups (Telegram, Alertmanager, HTTPS with Caddy, a full production
 | `-retain-info` | 0 | delete records of level info and debug older than this, at least 1h. 0 uses `-retain` only |
 | `-retain-records` | 0 | keep at most this many records in total, oldest deleted first. 0 for no limit |
 | `-retain-host-records` | 0 | keep at most this many records per host, oldest deleted first. 0 for no limit |
+| `-retain-bytes` | 0 | keep the records under this size, such as `20GiB` (suffixes K, M, G, T are powers of 1024), oldest deleted first. 0 for no limit |
 | `-rules` | | extra incident rules, see [incidents-and-alerts.md](incidents-and-alerts.md#rules) |
 | `-silent-after` | 2m | time without packets before a `silent` incident, 0 to disable |
 | `-crash-wait` | 2m | time after a reboot to wait for pstore lines before deciding crash or reboot |
@@ -199,6 +200,7 @@ A cleanup runs one minute after start and then every 10 minutes when at least on
 | `-retain-info 72h` | info and debug lines (levels 6 and 7) older than 72 hours | the bulk of most kernel logs. Errors and warnings stay longer |
 | `-retain-host-records 500000` | the oldest records of each host above 500000 | one noisy host cannot push out the logs of the others |
 | `-retain-records 20000000` | the oldest records above 20 million, over all hosts | a hard cap that keeps the database size in check. A record takes about 300 to 500 bytes with indexes |
+| `-retain-bytes 20GiB` | the oldest records while the records take more than 20 GiB, down to 90% of it | a cap that follows the disk, without guessing the record size |
 | `-retain 720h` | records, closed incidents, boots, agent runs and silences older than 30 days | the general age limit |
 
 The count limits only remove records. Incidents keep their summary, but the log lines shown with an old incident may be gone.
@@ -206,6 +208,11 @@ The count limits only remove records. Incidents keep their summary, but the log 
 With `-retain`, the newest boot of each host is always kept, so crash logs sent by the next boot still find their boot. Removed boots are remembered by name only, so a boot that sends again after its removal (a replay, or a machine with a wrong boot ID) is not taken for a new boot.
 
 SQLite does not give space back to the file system: it reuses it for new records. To shrink the file, stop the server and run `sqlite3 lastgasp.db VACUUM`.
+
+How `-retain-bytes` measures the size:
+
+- SQLite: the pages of the database file in use, so free pages left by deleted records do not count. The file stops growing near the limit, plus the WAL file.
+- PostgreSQL: the size of the record rows, estimated from the newest 1000 rows. Indexes and space waiting for vacuum are not counted, so leave about half of the disk budget for them.
 
 ## Reload
 

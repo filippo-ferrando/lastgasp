@@ -53,6 +53,11 @@ has "$TMP/rules" 'reason="replay"'
 has "$TMP/rules" 'prometheus.io/scrape: "true"'
 hasnot "$TMP/rules" "kind: ServiceMonitor"
 
+# A size limit is passed only when set.
+hasnot "$d" "retain-bytes"
+render size --set server.retainBytes=4GiB
+has "$TMP/size" "- -retain-bytes=4GiB"
+
 # PostgreSQL: no volume claim, password from a secret.
 render pg --set server.database.url='postgres://lastgasp@db:5432/lastgasp' --set server.database.passwordSecret.name=pg
 has "$TMP/pg" "- -db=postgres://lastgasp@db:5432/lastgasp"

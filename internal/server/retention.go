@@ -2,7 +2,11 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"lastgasp/internal/incident"
@@ -23,12 +27,14 @@ type Retention struct {
 	// MaxRecords and MaxHostRecords keep the newest records, in total and per host.
 	MaxRecords     int
 	MaxHostRecords int
-	Every          time.Duration
+	// MaxBytes keeps the records under this size, as estimated by Store.RecordsSize.
+	MaxBytes int64
+	Every    time.Duration
 }
 
 // Enabled reports whether any limit is set.
 func (r *Retention) Enabled() bool {
-	return r.Age > 0 || r.InfoAge > 0 || r.MaxRecords > 0 || r.MaxHostRecords > 0
+	return r.Age > 0 || r.InfoAge > 0 || r.MaxRecords > 0 || r.MaxHostRecords > 0 || r.MaxBytes > 0
 }
 
 // Run deletes old data a minute after start and then every r.Every, until ctx is done.
@@ -90,7 +96,40 @@ func (r *Retention) trim(ctx context.Context, now time.Time) (int64, error) {
 			return total, err
 		}
 	}
+	// The size also holds other tables, so one cut may not be enough: measure again after each one.
+	for range 5 {
+		if r.MaxBytes <= 0 {
+			break
+		}
+		size, rows, err := r.Store.RecordsSize(ctx)
+		if err != nil || size <= r.MaxBytes {
+			return total, err
+		}
+		// Trim to 90% of the limit, so the next run does not trim again right away.
+		keep := int(float64(rows) * 0.9 * float64(r.MaxBytes) / float64(size))
+		n, err := r.Store.TrimRecords(ctx, "", keep)
+		if err := count(n, err); err != nil || n == 0 {
+			return total, err
+		}
+	}
 	return total, nil
+}
+
+// ParseSize reads a byte count such as "500000", "512MiB" or "20G". Suffixes are powers of 1024.
+func ParseSize(v string) (int64, error) {
+	num := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(v), "B"), "i")
+	shift := 0
+	for i, u := range "KMGT" {
+		if cut, ok := strings.CutSuffix(num, string(u)); ok {
+			shift, num = 10*(i+1), cut
+			break
+		}
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("invalid size %q", v)
+	}
+	return n << shift, nil
 }
 
 // byAge deletes everything older than now minus r.Age.

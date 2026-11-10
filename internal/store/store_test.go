@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -425,6 +426,45 @@ func TestOpenIncidentsIsNotPaged(t *testing.T) {
 	l, err := s.OpenIncidents(ctx)
 	if err != nil || len(l) != 1200 {
 		t.Fatalf("got %d, err %v", len(l), err)
+	}
+}
+
+func TestRecordsSize(t *testing.T) {
+	for name, s := range openStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			insert := func(from, to int) {
+				var recs []*Record
+				for i := from; i < to; i++ {
+					recs = append(recs, rec("kmsg", fmt.Sprint("d", i), fmt.Sprint("c", i), strings.Repeat("x", 500), 6))
+				}
+				if _, err := s.InsertBatch(ctx, recs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// PostgreSQL counts live rows from its statistics, which are updated a moment after the commit.
+			wait := func(want int64) int64 {
+				for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+					size, rows, err := s.RecordsSize(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if rows == want || time.Now().After(deadline) {
+						if rows != want {
+							t.Fatalf("rows %d, want %d", rows, want)
+						}
+						return size
+					}
+				}
+			}
+			insert(0, 200)
+			small := wait(200)
+			insert(200, 1000)
+			big := wait(1000)
+			if small <= 0 || big < small+700*500 {
+				t.Fatalf("size %d with 200 records, %d with 1000", small, big)
+			}
+		})
 	}
 }
 

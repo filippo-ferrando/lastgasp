@@ -131,7 +131,7 @@ I try to be honest about what it doesn't do (yet):
 
 - Lost lines are sent again only while they are still in the agent buffer (or its stash, after a restart). A long outage at full rate can still lose some (they show up as missing, at least).
 - A kernel panic stops everything instantly, the agent included. The panic message itself only reaches you through pstore, so set up a pstore backend (EFI or ramoops) on machines you care about.
-- Retention limits count records, not bytes.
+- On PostgreSQL, the size limit counts record rows only, not indexes or space waiting for vacuum.
 - Only kernel logs, no journald or syslog lines (yet).
 - The web UI needs HTTPS in front of it (a reverse proxy) when used over the network.
 

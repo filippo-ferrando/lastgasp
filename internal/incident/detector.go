@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,6 +98,8 @@ type Detector struct {
 	mu    sync.Mutex
 	open  map[string]*store.Incident
 	dirty map[int64]*store.Incident
+	// hits holds recent matches of rules with a count, per open key, until the count is reached.
+	hits map[string]*ruleHits
 	// lastReboot is the newest reboot per host that was not found to be a crash. pstore lines
 	// that arrive after the crash check can still turn it into one.
 	lastReboot map[string]*store.Incident
@@ -113,13 +116,43 @@ func NewDetector(st *store.Store, rules *Rules, cfg Config, m *Metrics, log *slo
 	}
 	d := &Detector{Store: st, Log: log, Metrics: m, Wake: func() {}, cfg: cfg,
 		hosts: map[string]*hostState{}, open: map[string]*store.Incident{}, dirty: map[int64]*store.Incident{},
-		lastReboot: map[string]*store.Incident{}}
+		hits: map[string]*ruleHits{}, lastReboot: map[string]*store.Incident{}}
 	d.SetRules(rules)
 	return d
 }
 
 // SetRules replaces the rules, for example after a reload.
 func (d *Detector) SetRules(r *Rules) { d.rules.Store(r) }
+
+// shortDuration writes 1h instead of 1h0m0s.
+func shortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = s[:len(s)-2]
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = s[:len(s)-2]
+	}
+	return s
+}
+
+// ruleHits are the times and record IDs of the newest matches of a rule with a count, oldest first.
+type ruleHits struct {
+	window time.Duration
+	at     []time.Time
+	ids    []int64
+}
+
+// add records a match and drops those older than the window. It reports whether count is reached.
+func (h *ruleHits) add(now time.Time, id int64, count int) bool {
+	h.at, h.ids = append(h.at, now), append(h.ids, id)
+	drop := 0
+	for drop < len(h.at) && (now.Sub(h.at[drop]) > h.window || len(h.at)-drop > count) {
+		drop++
+	}
+	h.at, h.ids = h.at[drop:], h.ids[drop:]
+	return len(h.at) >= count
+}
 
 func openKey(host, boot, kind, rule string) string {
 	return host + "|" + boot + "|" + kind + "|" + rule
@@ -258,8 +291,22 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 			d.dirty[inc.ID] = inc
 			continue
 		}
-		d.create(ctx, &store.Incident{Host: r.Host, BootID: r.BootID, Kind: KindKernelError, Severity: rule.Severity,
-			Rule: rule.Name, FirstRecordID: r.ID, LastRecordID: r.ID, Count: 1, Summary: r.Message, OpenedAt: now, UpdatedAt: now})
+		inc := &store.Incident{Host: r.Host, BootID: r.BootID, Kind: KindKernelError, Severity: rule.Severity,
+			Rule: rule.Name, FirstRecordID: r.ID, LastRecordID: r.ID, Count: 1, Summary: r.Message, OpenedAt: now, UpdatedAt: now}
+		if rule.Count > 1 {
+			h := d.hits[key]
+			if h == nil {
+				h = &ruleHits{window: rule.Window}
+				d.hits[key] = h
+			}
+			if !h.add(now, r.ID, rule.Count) {
+				continue
+			}
+			delete(d.hits, key)
+			inc.FirstRecordID, inc.Count = h.ids[0], len(h.ids)
+			inc.Summary = fmt.Sprintf("%d times in %s: %s", len(h.ids), shortDuration(rule.Window), r.Message)
+		}
+		d.create(ctx, inc)
 		created = true
 	}
 	found := map[*store.Incident]*crash{}
@@ -326,6 +373,11 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 		silent = append(silent, silentHost{host: host, boot: h.boot, lastSeen: h.lastSeen})
 	}
 	d.hmu.Unlock()
+	for key, h := range d.hits {
+		if now.Sub(h.at[len(h.at)-1]) > h.window {
+			delete(d.hits, key)
+		}
+	}
 	for key, inc := range d.open {
 		switch {
 		case inc.Kind == KindReboot && now.Sub(inc.OpenedAt) >= d.cfg.CrashWait:
@@ -528,14 +580,14 @@ func (d *Detector) checkCrash(ctx context.Context, q crashQuery) (*crash, error)
 	var hit *Rule
 	var line string
 	for i := range pstore {
-		if r := rules.Match(pstore[i].Message); r != nil && r.Severity == store.SeverityCritical {
+		if r := rules.Match(pstore[i].Message); r != nil && r.Severity == store.SeverityCritical && r.Count <= 1 {
 			hit, line = r, pstore[i].Message
 			break
 		}
 	}
 	// The tail is newest first; the oldest critical line is usually the cause.
 	for i := len(tail) - 1; i >= 0 && hit == nil; i-- {
-		if r := rules.Match(tail[i].Message); r != nil && r.Severity == store.SeverityCritical {
+		if r := rules.Match(tail[i].Message); r != nil && r.Severity == store.SeverityCritical && r.Count <= 1 {
 			hit, line = r, tail[i].Message
 		}
 	}

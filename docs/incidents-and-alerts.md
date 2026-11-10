@@ -57,7 +57,7 @@ Set `kernel.panic=10` (sysctl) so a panicked machine reboots by itself and the p
 
 ## Rules
 
-A rule has a name, a severity and a regular expression ([Go syntax](https://pkg.go.dev/regexp/syntax)), matched against each kernel line. The first matching rule wins.
+A rule has a name, a severity, an optional count and a regular expression ([Go syntax](https://pkg.go.dev/regexp/syntax)), matched against each kernel line. The first matching rule wins. A rule with a count, like `10/1h`, opens an incident only once that many lines matched within that time, for errors that are harmless when rare. The count does not apply to crash detection: such rules never make a reboot a crash.
 
 | Name | Severity | Matches |
 | --- | --- | --- |
@@ -66,7 +66,10 @@ A rule has a name, a severity and a regular expression ([Go syntax](https://pkg.
 | `oops` | critical | `Oops: ` at the start, or `Oops ... [#N]` |
 | `bug` | critical | `BUG: ` at the start |
 | `gpf` | critical | `general protection fault` |
-| `mce` | critical | `[Hardware Error]` |
+| `mce_corrected` | warning, 10/1h | `Machine check events logged`, `[Hardware Error]: Corrected error` or `event severity: corrected` |
+| `edac_ce` | warning, 10/1h | EDAC corrected memory errors (`EDAC MC0: 1 CE ...`) |
+| `edac_ue` | critical | EDAC uncorrected memory errors (`EDAC MC0: 1 UE ...`) |
+| `mce` | critical | any other `[Hardware Error]` |
 | `memory_failure` | critical | `Memory failure: ` |
 | `rcu_stall` | warning | `rcu_... detected stall`, `detected stalls on CPUs` |
 | `hung_task` | warning | `blocked for more than N seconds` |
@@ -78,10 +81,11 @@ A rule has a name, a severity and a regular expression ([Go syntax](https://pkg.
 A rules file (`-rules`) adds, replaces or removes rules, one per line:
 
 ```text
-# name      severity  regexp
+# name      severity  [count/window]  regexp
 raid        warning   md/raid\d+:.*: Disk failure
 io_error    critical  I/O error, dev nvme
 link_down   info      (eth|en)\w+: Link is Down
+link_flap   warning   5/10m (eth|en)\w+: Link is Up
 oom         off
 ```
 

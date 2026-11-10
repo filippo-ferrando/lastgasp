@@ -30,7 +30,10 @@ func TestDefaultRules(t *testing.T) {
 		"Out of memory: Killed process 1234 (java) total-vm:1234kB":           "oom",
 		"blk_update_request: I/O error, dev sda, sector 2048 op 0x0:(READ)":   "io_error",
 		"EXT4-fs error (device sda1): ext4_find_entry:1455: inode #2":         "fs_error",
-		"mce: [Hardware Error]: Machine check events logged":                  "mce",
+		"mce: [Hardware Error]: Machine check events logged":                  "mce_corrected",
+		"mce: [Hardware Error]: CPU 3: Machine Check Exception: 5 Bank 4":     "mce",
+		"EDAC MC0: 1 CE memory read error on CPU_SrcID#0_Ha#0_Chan#1_DIMM#0":  "edac_ce",
+		"EDAC MC1: 1 UE memory read error on CPU_SrcID#1_Ha#0_Chan#0_DIMM#1":  "edac_ue",
 		"INFO: task jbd2/sda1-8:312 blocked for more than 120 seconds.":       "hung_task",
 		"usb 1-1: new high-speed USB device number 2 using xhci_hcd":          "",
 	} {
@@ -58,7 +61,20 @@ func TestParseRules(t *testing.T) {
 	if m := r.Match("md/raid1:md0: Disk failure on sdb1"); m == nil || m.Name != "raid" {
 		t.Fatal("new rule not added")
 	}
-	for _, bad := range []string{"x", "x loud abc", "x warning (", "x warning"} {
+	r, err = ParseRules(strings.NewReader("flaky warning 5/10m link is down\nedac_ce off\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := r.Match("eth0: link is down"); m == nil || m.Count != 5 || m.Window != 10*time.Minute {
+		t.Fatalf("rate rule: %+v", m)
+	}
+	if m := r.Match("EDAC MC0: 1 CE x"); m != nil {
+		t.Fatalf("edac_ce should be off, matched %s", m.Name)
+	}
+	if m := DefaultRules().Match("EDAC MC0: 1 CE x"); m == nil || m.Count != 10 || m.Window != time.Hour {
+		t.Fatalf("built-in rate: %+v", m)
+	}
+	for _, bad := range []string{"x", "x loud abc", "x warning (", "x warning", "x warning 0/1h abc", "x warning 5/1y abc"} {
 		if _, err := ParseRules(strings.NewReader(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
@@ -135,6 +151,36 @@ func TestKernelErrorsAreGrouped(t *testing.T) {
 	panic, io := l[0], l[1]
 	if panic.Rule != "panic" || panic.Severity != store.SeverityCritical || io.Rule != "io_error" || io.Count != 2 || io.LastRecordID <= io.FirstRecordID {
 		t.Fatalf("got %+v", l)
+	}
+}
+
+func TestRateRuleOpensAtCount(t *testing.T) {
+	e := newEnv(t)
+	ce := "EDAC MC0: 1 CE memory read error on DIMM_A1"
+	// 9 corrected errors spread over more than an hour never reach 10 within one hour.
+	for i := range 9 {
+		e.add(t, "h", "b1", "kmsg", e.t0.Add(time.Duration(i)*10*time.Minute), ce)
+	}
+	e.d.Tick(context.Background(), e.t0.Add(81*time.Minute))
+	if l := withoutSilent(e.incidents(t)); len(l) != 0 {
+		t.Fatalf("opened below the count: %+v", l)
+	}
+	// 10 within a few minutes open one incident, counting all of them.
+	for i := range 10 {
+		e.add(t, "h", "b1", "kmsg", e.t0.Add(3*time.Hour+time.Duration(i)*time.Second), ce)
+	}
+	l := withoutSilent(e.incidents(t))
+	if len(l) != 1 || l[0].Rule != "edac_ce" || l[0].Count != 10 || l[0].Summary != "10 times in 1h: "+ce ||
+		l[0].LastRecordID-l[0].FirstRecordID != 9 {
+		t.Fatalf("got %+v", l)
+	}
+	// Further matches add to the open incident.
+	e.add(t, "h", "b1", "kmsg", e.t0.Add(3*time.Hour+time.Minute), ce)
+	if l := withoutSilent(e.incidents(t)); len(l) != 1 || l[0].Count != 11 {
+		t.Fatalf("got %+v", l)
+	}
+	if len(e.d.hits) != 0 {
+		t.Fatalf("hits kept: %v", e.d.hits)
 	}
 }
 

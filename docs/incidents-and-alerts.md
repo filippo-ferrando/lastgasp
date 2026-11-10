@@ -13,6 +13,8 @@ The server turns the moments that matter into incidents, one per host, boot, kin
 | `flapping` | `-flap-count` reboots or returns from silence within `-flap-window` (3 in 1 hour by default). Reboot and silent alerts of the host are held back (`suppressed`) while it is open | `-flap-window` without a new one (resolved) | warning |
 | `server` | a problem of the lastgasp server itself, see [Server incidents](#server-incidents) | 5 minutes without a new problem (resolved) | from the check |
 
+When `-group-min-hosts` hosts (3 by default) reboot, or go silent, within `-group-window` (2 minutes), their incidents share a group: a power cut, a network outage or a rolling upgrade. Each alert target sends one alert for the group that names its hosts, the other members get the alert state `grouped`. Members alerted before the group formed keep their own alert. The UI marks group members in the incident list.
+
 A clean reboot is a reboot that did not turn into a crash. A crash does not resolve the errors that led to it.
 
 Any incident except an open `reboot` or `silent` one can also be resolved by hand, see [Working with incidents](#working-with-incidents).

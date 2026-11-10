@@ -233,6 +233,45 @@ func TestFlappingHost(t *testing.T) {
 	}
 }
 
+func TestRebootsOfManyHostsShareOneAlert(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.d.cfg.GroupMinHosts, e.d.cfg.GroupWindow, e.d.cfg.SilentAfter = 3, 2*time.Minute, 0
+	h := &hook{}
+	n := &Notifier{Store: e.st, Name: "hook", URL: newHook(t, h), MinSeverity: store.SeverityInfo, Metrics: e.d.Metrics, Log: e.d.Log}
+	n.init()
+	// A power cut: 5 hosts reboot within a minute. Another one reboots later on its own.
+	for i := range 5 {
+		e.d.NewBoot(ctx, fmt.Sprint("h", i), "b2", "b1", e.t0.Add(time.Duration(i)*15*time.Second))
+	}
+	e.d.NewBoot(ctx, "late", "b2", "b1", e.t0.Add(10*time.Minute))
+	e.d.Tick(ctx, e.t0.Add(12*time.Minute))
+	if err := n.flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.bodies) != 2 {
+		t.Fatalf("sent %d alerts, want 2: %v", len(h.bodies), h.bodies)
+	}
+	var p Payload
+	json.Unmarshal([]byte(h.bodies[0]), &p)
+	if !strings.Contains(p.Text, "5 hosts within a short time: h0, h1, h2, h3, h4.") || p.Incident.GroupID != 1 {
+		t.Fatalf("group alert %+v", p)
+	}
+	l, _ := e.st.Incidents(ctx, store.IncidentFilter{Kind: KindReboot})
+	for _, i := range l {
+		want, state := int64(1), store.AlertGrouped
+		switch i.Host {
+		case "h0":
+			state = store.AlertSent
+		case "late":
+			want, state = 0, store.AlertSent
+		}
+		if i.GroupID != want || alertOf(i, "hook") != state {
+			t.Errorf("%s: group %d, alert %s", i.Host, i.GroupID, alertOf(i, "hook"))
+		}
+	}
+}
+
 func TestSilentHostOpensAndCloses(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()

@@ -490,12 +490,21 @@ async function loadIncidents() {
   if (!list.length) {
     return render($("incidents"), `<div class="empty">${$("inc-open").checked ? "No open incidents." : "No incidents."}</div>`);
   }
+  // Incidents of several hosts at once share a group. The tag names the hosts of the group in this list.
+  const groups = {};
+  for (const i of list) if (i.group_id) (groups[i.group_id] ||= []).push(i.host);
+  const groupTag = i => {
+    if (!i.group_id) return "";
+    const n = groups[i.group_id].length - 1;
+    return ` <span class="tag" title="Same kind on several hosts at once: ${esc(groups[i.group_id].join(", "))}">${
+      n ? "with " + fmtNum(n) + " more" : "group"}</span>`;
+  };
   render($("incidents"), `<table><tr><th>Severity</th><th>Opened</th><th>Host</th><th>Kind</th>
     <th class="num">Count</th><th>State</th><th>Summary</th></tr>` +
     list.map(i => `<tr class="click${i.closed_at ? " closed" : ""}" tabindex="0" data-key="${i.id}" title="Open incident ${i.id}">
       <td class="sev sev-${esc(i.severity)}">${esc(i.severity)}</td>
       ${age(i.opened_at)}
-      <td>${esc(i.host)}</td><td>${esc(KINDS[i.kind] || i.kind)}${i.rule ? ` <span class="tag">${esc(i.rule)}</span>` : ""}</td>
+      <td>${esc(i.host)}</td><td>${esc(KINDS[i.kind] || i.kind)}${i.rule ? ` <span class="tag">${esc(i.rule)}</span>` : ""}${groupTag(i)}</td>
       <td class="num">${fmtNum(i.count)}</td>
       <td class="muted">${state(i)}</td>
       <td class="summary" title="${esc(i.summary)}">${esc(i.summary)}</td></tr>`).join("") + "</table>");

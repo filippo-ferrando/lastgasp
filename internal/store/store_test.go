@@ -314,7 +314,8 @@ func TestMigratesVersionOneDatabase(t *testing.T) {
 			}
 			// Turn it back into a version 1 database: alert column, no alerts table, no version.
 			for _, q := range []string{`DROP TABLE alerts`, `ALTER TABLE incidents DROP COLUMN resolved`,
-				`ALTER TABLE incidents DROP COLUMN acked_by`, `ALTER TABLE incidents DROP COLUMN note`, `DROP TABLE silences`,
+				`ALTER TABLE incidents DROP COLUMN acked_by`, `ALTER TABLE incidents DROP COLUMN note`,
+				`ALTER TABLE incidents DROP COLUMN group_id`, `DROP TABLE silences`,
 				`DROP TABLE sessions`, `DROP TABLE enroll_tokens`, `DROP TABLE agent_keys`,
 				`ALTER TABLE incidents ADD COLUMN alert TEXT NOT NULL DEFAULT ''`, `DROP TABLE schema_version`} {
 				if _, err := s.db.Exec(q); err != nil {

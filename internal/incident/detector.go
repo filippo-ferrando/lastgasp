@@ -48,6 +48,9 @@ type Config struct {
 	// FlapCount reboots or returns from silence within FlapWindow open a flapping incident. 0 turns it off.
 	FlapCount  int
 	FlapWindow time.Duration
+	// GroupMinHosts hosts that reboot or go silent within GroupWindow share a group and one alert. 0 turns it off.
+	GroupMinHosts int
+	GroupWindow   time.Duration
 }
 
 // Metrics are the incident Prometheus metrics.
@@ -107,6 +110,8 @@ type Detector struct {
 	hits map[string]*ruleHits
 	// flaps holds the times of recent reboots and returns from silence per host, oldest first.
 	flaps map[string][]time.Time
+	// recent holds the reboot and silent incidents opened within GroupWindow, oldest first.
+	recent []*store.Incident
 	// lastReboot is the newest reboot per host that was not found to be a crash. pstore lines
 	// that arrive after the crash check can still turn it into one.
 	lastReboot map[string]*store.Incident
@@ -426,6 +431,7 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 			delete(d.flaps, host)
 		}
 	}
+	d.pruneRecent(now)
 	for key, inc := range d.open {
 		switch {
 		case inc.Kind == KindReboot && now.Sub(inc.OpenedAt) >= d.cfg.CrashWait:
@@ -670,13 +676,66 @@ func (d *Detector) markCrash(inc *store.Incident, c *crash) {
 }
 
 func (d *Detector) create(ctx context.Context, inc *store.Incident) {
+	members := d.groupOf(inc)
 	if err := d.Store.CreateIncident(ctx, inc); err != nil {
 		d.Log.Error("save incident", "err", err)
 		return
 	}
+	if d.cfg.GroupMinHosts > 0 && (inc.Kind == KindReboot || inc.Kind == KindSilent) {
+		d.recent = append(d.recent, inc)
+	}
+	if len(members) > 0 {
+		var ids []int64
+		for _, m := range members {
+			if m.GroupID == 0 {
+				m.GroupID = inc.GroupID
+				ids = append(ids, m.ID)
+			}
+		}
+		if err := d.Store.SetGroup(ctx, inc.GroupID, ids); err != nil {
+			d.Log.Error("save incident", "err", err)
+		}
+	}
 	d.open[keyOf(inc)] = inc
 	d.Metrics.Created.WithLabelValues(inc.Host, inc.Kind).Inc()
 	d.Log.Info("incident", "id", inc.ID, "host", inc.Host, "kind", inc.Kind, "severity", inc.Severity.String(), "summary", inc.Summary)
+}
+
+// pruneRecent forgets incidents opened more than GroupWindow before now. mu must be held.
+func (d *Detector) pruneRecent(now time.Time) {
+	drop := 0
+	for drop < len(d.recent) && now.Sub(d.recent[drop].OpenedAt) > d.cfg.GroupWindow {
+		drop++
+	}
+	d.recent = d.recent[drop:]
+}
+
+// groupOf finds the incidents of other hosts with the same kind as inc within GroupWindow. When there
+// are enough, inc joins their group, and the members returned still need to join it. mu must be held.
+func (d *Detector) groupOf(inc *store.Incident) []*store.Incident {
+	if d.cfg.GroupMinHosts <= 0 || (inc.Kind != KindReboot && inc.Kind != KindSilent) {
+		return nil
+	}
+	d.pruneRecent(inc.OpenedAt)
+	var members []*store.Incident
+	hosts := map[string]bool{inc.Host: true}
+	for _, r := range d.recent {
+		if r.Kind == inc.Kind && !hosts[r.Host] {
+			hosts[r.Host] = true
+			members = append(members, r)
+		}
+	}
+	if len(hosts) < d.cfg.GroupMinHosts {
+		return nil
+	}
+	inc.GroupID = members[0].ID
+	for _, m := range members {
+		if m.GroupID != 0 {
+			inc.GroupID = m.GroupID
+			break
+		}
+	}
+	return members
 }
 
 func (d *Detector) close(ctx context.Context, key string, inc *store.Incident, now time.Time) {

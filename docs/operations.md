@@ -154,4 +154,5 @@ For key file lines:
 - On PostgreSQL, `-retain-bytes` counts the record rows only, estimated from the newest rows. Indexes and space waiting for vacuum come on top.
 - Records recovered from the stash are sent by the new agent run, so the missing packets of the old run stay counted as missing.
 - Alerts are sent at least once. A server stopped right after sending an alert, before saving that it did, sends it again after the restart.
+- Which groups got their alert is kept in memory, so a group still growing during a server restart can get a second group alert.
 - One server process reads one UDP socket. Several `-server` addresses send every packet to every server: that adds redundancy, not capacity.

@@ -55,6 +55,7 @@ const (
 	AlertSkipped    = "skipped"  // the problem was over before the alert went out, so nothing was sent
 	AlertFailed     = "failed"   // the target refused the alert for good, or kept failing, so it was given up
 	AlertSilenced   = "silenced" // a silence matched the incident, so nothing was sent
+	AlertGrouped    = "grouped"  // an alert for its group named this host already
 )
 
 // AlertState is the alert state of an incident for one target.
@@ -84,8 +85,10 @@ type Incident struct {
 	// Note is free text set by a user when acknowledging or resolving.
 	Note string `json:"note,omitempty"`
 	// Resolved means the problem is over, so targets that got an alert get a second one.
-	Resolved bool         `json:"resolved"`
-	Alerts   []AlertState `json:"alerts"`
+	Resolved bool `json:"resolved"`
+	// GroupID is the ID of the first incident of the same kind on several hosts at once, 0 when alone.
+	GroupID int64        `json:"group_id,omitempty"`
+	Alerts  []AlertState `json:"alerts"`
 }
 
 // Open reports whether the incident is still going on.
@@ -121,14 +124,14 @@ func b2i(b bool) int {
 }
 
 const incidentCols = `i.id, i.host, i.boot_id, i.kind, i.severity, i.rule, i.opened_at, i.updated_at, i.closed_at,
-	i.first_record_id, i.last_record_id, i.count, i.summary, i.resolved, i.acked_at, i.acked_by, i.note`
+	i.first_record_id, i.last_record_id, i.count, i.summary, i.resolved, i.acked_at, i.acked_by, i.note, i.group_id`
 
 func scanIncident(sc interface{ Scan(...any) error }) (Incident, error) {
 	var i Incident
 	var opened, updated, closed, acked int64
 	var resolved int
 	err := sc.Scan(&i.ID, &i.Host, &i.BootID, &i.Kind, &i.Severity, &i.Rule, &opened, &updated, &closed,
-		&i.FirstRecordID, &i.LastRecordID, &i.Count, &i.Summary, &resolved, &acked, &i.AckedBy, &i.Note)
+		&i.FirstRecordID, &i.LastRecordID, &i.Count, &i.Summary, &resolved, &acked, &i.AckedBy, &i.Note, &i.GroupID)
 	i.OpenedAt, i.UpdatedAt, i.ClosedAt, i.AckedAt = fromMs(opened), fromMs(updated), fromMs(closed), fromMs(acked)
 	i.Resolved = resolved == 1
 	i.Alerts = []AlertState{}
@@ -138,10 +141,41 @@ func scanIncident(sc interface{ Scan(...any) error }) (Incident, error) {
 // CreateIncident saves a new incident and sets its ID.
 func (s *Store) CreateIncident(ctx context.Context, i *Incident) error {
 	return s.db.QueryRowContext(ctx, s.q(`INSERT INTO incidents (host, boot_id, kind, severity, rule, opened_at, updated_at,
-		closed_at, first_record_id, last_record_id, count, summary, resolved, acked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`),
+		closed_at, first_record_id, last_record_id, count, summary, resolved, acked_at, group_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`),
 		i.Host, i.BootID, i.Kind, int(i.Severity), i.Rule, ms(i.OpenedAt), ms(i.UpdatedAt), ms(i.ClosedAt),
-		i.FirstRecordID, i.LastRecordID, i.Count, i.Summary, b2i(i.Resolved), ms(i.AckedAt)).Scan(&i.ID)
+		i.FirstRecordID, i.LastRecordID, i.Count, i.Summary, b2i(i.Resolved), ms(i.AckedAt), i.GroupID).Scan(&i.ID)
+}
+
+// SetGroup puts the incidents ids into group.
+func (s *Store) SetGroup(ctx context.Context, group int64, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := []any{group}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE incidents SET group_id = ? WHERE id IN (?`+strings.Repeat(", ?", len(ids)-1)+`)`), args...)
+	return err
+}
+
+// GroupHosts lists the hosts of a group, oldest incident first.
+func (s *Store) GroupHosts(ctx context.Context, group int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT host FROM incidents WHERE group_id = ? ORDER BY id LIMIT 1000`), group)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
 
 // UpdateIncident saves the fields the detector changes. Alert and ack state are left alone.

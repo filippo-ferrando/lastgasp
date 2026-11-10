@@ -60,6 +60,7 @@ type Notifier struct {
 	wake      chan struct{}
 	last      map[string]time.Time
 	tries     map[string]int
+	groups    map[int64]time.Time // groups this target got an alert for, so other members are not sent
 	now       func() time.Time
 	refreshed time.Time // last time open incidents were sent again to Alertmanager
 }
@@ -78,6 +79,7 @@ func (n *Notifier) init() {
 	n.once.Do(func() {
 		n.wake = make(chan struct{}, 1)
 		n.last = map[string]time.Time{}
+		n.groups = map[int64]time.Time{}
 		n.tries = map[string]int{}
 		if n.now == nil {
 			n.now = time.Now
@@ -153,6 +155,11 @@ func (n *Notifier) flush(ctx context.Context) error {
 		for _, f := range flapping {
 			flappingSince[f.Host] = f.OpenedAt
 		}
+		for g, at := range n.groups {
+			if n.now().Sub(at) > MaxAlertAge {
+				delete(n.groups, g)
+			}
+		}
 		for i := range pending {
 			p := &pending[i]
 			// Rules have their own limit, so a warning never holds back a critical line of another rule.
@@ -171,8 +178,22 @@ func (n *Notifier) flush(ctx context.Context) error {
 				!p.OpenedAt.Before(flappingSince[p.Host]):
 				// The flapping incident speaks for them.
 				state = store.AlertSuppressed
+			case p.GroupID != 0 && !n.groups[p.GroupID].IsZero():
+				state = store.AlertGrouped
 			case n.RateLimit > 0 && n.now().Sub(n.last[key]) < n.RateLimit:
 				state = store.AlertSuppressed
+			}
+			if state == store.AlertSent && p.GroupID != 0 {
+				// The first alert of a group names every host, later members get none.
+				hosts, err := n.Store.GroupHosts(ctx, p.GroupID)
+				if err != nil {
+					return err
+				}
+				names := strings.Join(hosts[:min(len(hosts), 20)], ", ")
+				if len(hosts) > 20 {
+					names += fmt.Sprintf(" and %d more", len(hosts)-20)
+				}
+				p.Summary = fmt.Sprintf("%d hosts within a short time: %s. %s", len(hosts), names, p.Summary)
 			}
 			if state == store.AlertSent || state == store.AlertResolved {
 				if err := n.send(ctx, p); err != nil {
@@ -185,6 +206,9 @@ func (n *Notifier) flush(ctx context.Context) error {
 					state = store.AlertFailed
 				} else if !p.Resolve {
 					n.last[key] = n.now()
+					if p.GroupID != 0 {
+						n.groups[p.GroupID] = n.now()
+					}
 				}
 				delete(n.tries, try)
 			}

@@ -238,6 +238,10 @@ func (s *Store) migrate(ctx context.Context) error {
 				from_addr TEXT NOT NULL,
 				enrolled_at BIGINT NOT NULL)`,
 		},
+		{
+			// Incidents of several hosts at once, like a power cut, share the ID of the first one.
+			`ALTER TABLE incidents ADD COLUMN group_id BIGINT NOT NULL DEFAULT 0`,
+		},
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
 		return err

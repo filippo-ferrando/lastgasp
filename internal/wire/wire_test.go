@@ -38,6 +38,23 @@ func TestRoundTripRecord(t *testing.T) {
 	}
 }
 
+func TestRoundTripJournal(t *testing.T) {
+	p := samplePacket()
+	p.Kind, p.Record.FileID, p.Record.Msg = KindJournal, 0xfeed, "sshd.service: Accepted publickey"
+	b, err := Encode(p, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Decode(b, keyFor); err != nil || *got != *p || got.Kind.String() != "journal" {
+		t.Fatalf("got %+v err %v", got, err)
+	}
+	agent, server := sessionPair(t, "node-1")
+	b, _ = agent.Seal(p)
+	if got, err := server.Open(b); err != nil || got.Kind != KindJournal || got.Record.FileID != 0xfeed {
+		t.Fatalf("session: %+v err %v", got, err)
+	}
+}
+
 func TestRoundTripHeartbeat(t *testing.T) {
 	p := samplePacket()
 	p.Kind = KindHeartbeat

@@ -26,6 +26,7 @@ type Sender struct {
 	Key       []byte
 	Queue     *Queue
 	First     *Queue // pstore lines and records of the previous run, sent before Queue, may be nil
+	Journal   *Queue // userspace lines, sent after Queue, may be nil
 	Resolver  interface{ Addrs() []*net.UDPAddr }
 	Stats     *Stats
 	Log       *Logger
@@ -187,10 +188,8 @@ func (s *Sender) readAcks(c packetConn) {
 			s.peerAcked(from)
 		}
 		if ack.Upto > 0 {
-			for _, q := range []*Queue{s.First, s.Queue} {
-				if q != nil {
-					q.Ack(ack.Upto, ack.Missing, tx)
-				}
+			for _, q := range s.queues() {
+				q.Ack(ack.Upto, ack.Missing, tx)
 			}
 		}
 		s.notifyAck()
@@ -322,15 +321,25 @@ func (s *Sender) drain() {
 	}
 }
 
-// next picks the next record to send, the first queue before the kmsg queue.
-func (s *Sender) next() (*Queue, Item, bool) {
-	if s.First != nil {
-		if it, ok := s.First.Next(); ok {
-			return s.First, it, true
+// queues returns the queues in send order: First, the kmsg queue, then Journal.
+func (s *Sender) queues() []*Queue {
+	out := make([]*Queue, 0, 3)
+	for _, q := range []*Queue{s.First, s.Queue, s.Journal} {
+		if q != nil {
+			out = append(out, q)
 		}
 	}
-	it, ok := s.Queue.Next()
-	return s.Queue, it, ok
+	return out
+}
+
+// next picks the next record to send, in the order of queues, so kernel lines never wait for userspace ones.
+func (s *Sender) next() (*Queue, Item, bool) {
+	for _, q := range s.queues() {
+		if it, ok := q.Next(); ok {
+			return q, it, true
+		}
+	}
+	return nil, Item{}, false
 }
 
 // sendItem sends a record, or sends it again with its first seq, so the server sees a late packet.
@@ -353,10 +362,7 @@ func (s *Sender) sendItem(q *Queue, it Item) error {
 // oldest returns the lowest seq the agent can still send again. Packets below it are never sent again.
 func (s *Sender) oldest() uint64 {
 	o := s.seq + 1
-	for _, q := range []*Queue{s.First, s.Queue} {
-		if q == nil {
-			continue
-		}
+	for _, q := range s.queues() {
 		if v := q.Oldest(); v != 0 && v < o {
 			o = v
 		}
@@ -370,9 +376,9 @@ func (s *Sender) needConfirm() bool {
 }
 
 func (s *Sender) buffered() int {
-	n := s.Queue.Len()
-	if s.First != nil {
-		n += s.First.Len()
+	n := 0
+	for _, q := range s.queues() {
+		n += q.Len()
 	}
 	return n
 }
@@ -384,13 +390,17 @@ func (s *Sender) wait(ctx context.Context, d time.Duration, queue bool) {
 	}
 	t := time.NewTimer(max(d, time.Millisecond))
 	defer t.Stop()
-	var pushed <-chan struct{}
+	var pushed, journal <-chan struct{}
 	if queue {
 		pushed = s.Queue.Ready()
+		if s.Journal != nil {
+			journal = s.Journal.Ready()
+		}
 	}
 	select {
 	case <-ctx.Done():
 	case <-pushed:
+	case <-journal:
 	case <-s.acked:
 	case <-t.C:
 	}

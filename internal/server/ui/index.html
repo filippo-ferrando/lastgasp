@@ -159,7 +159,7 @@ dialog .head { flex-wrap: wrap; }
         <option value="4">warning and above</option><option value="5">notice and above</option>
         <option value="6">info and above</option>
       </select>
-      <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option><option value="netconsole">netconsole</option></select>
+      <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option><option value="netconsole">netconsole</option><option value="journal">journal</option></select>
       <input id="f-q" type="search" placeholder="search text" aria-label="search text" title="Press / to search, Escape to clear">
       <input id="f-boot" type="hidden">
       <button id="f-boot-chip" hidden title="Show every boot"></button>
@@ -189,7 +189,7 @@ dialog .head { flex-wrap: wrap; }
 </dialog>
 <script>
 const LEVELS = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
-const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error", server: "server", flapping: "flapping"};
+const KINDS = {crash: "crash", reboot: "reboot", silent: "silent", kernel_error: "kernel error", journal_error: "journal error", server: "server", flapping: "flapping"};
 const PAGE = 300;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -376,7 +376,8 @@ const logs = {gen: 0, newest: 0, oldest: 0, noOlder: false, loadingOlder: false,
 function logRow(r) {
   const part = r.parts > 1 ? ` <span class="tag">part ${r.part}/${r.parts}</span>` : "";
   const src = r.source === "pstore" ? ' <span class="tag pstore" title="Saved by the kernel before a crash or reboot">pstore</span>'
-    : r.source === "netconsole" ? ' <span class="tag netconsole" title="Sent by the kernel netconsole as plain text, not by the agent: not authenticated">netconsole</span>' : "";
+    : r.source === "netconsole" ? ' <span class="tag netconsole" title="Sent by the kernel netconsole as plain text, not by the agent: not authenticated">netconsole</span>'
+    : r.source === "journal" ? ' <span class="tag" title="A userspace line from journald">journal</span>' : "";
   return `<tr${r.id === logs.mark ? ' class="hit"' : ""}><td class="meta hostlink" data-host="${esc(r.host)}" title="Show only ${esc(r.host)}">${esc(r.host)}</td>
     <td class="meta" title="boot ${esc(r.boot_id)}, received ${esc(new Date(r.received_at).toLocaleString())}">[${tsFmt(r.ts_usec)}]</td>
     <td class="meta lv${r.level}">${LEVELS[r.level]}</td><td class="lv${r.level}">${esc(r.message)}${part}${src}</td></tr>`;
@@ -681,7 +682,7 @@ async function showIncident(id) {
   setAckButton(i);
   $("inc-title").innerHTML = `<span class="sev sev-${esc(i.severity)}">${esc(i.severity)}</span>
     ${esc(i.host)}: ${esc(KINDS[i.kind] || i.kind)}${i.rule ? " (" + esc(i.rule) + ")" : ""}`;
-  const line = r => `<span class="ln${r.message === i.summary || r.id === i.last_record_id && i.kind === "kernel_error" ? " hit" : ""}">` +
+  const line = r => `<span class="ln${r.message === i.summary || r.id === i.last_record_id && (i.kind === "kernel_error" || i.kind === "journal_error") ? " hit" : ""}">` +
     `[${tsFmt(r.ts_usec)}] ${esc(LEVELS[r.level] || "")} ${esc(r.message)}</span>`;
   const block = rs => rs.map(line).join("");
   $("inc-body").innerHTML = `<h4>Summary</h4><pre>${esc(i.summary)}</pre>

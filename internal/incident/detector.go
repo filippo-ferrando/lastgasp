@@ -22,6 +22,8 @@ const (
 	KindReboot      = "reboot"
 	KindSilent      = "silent"
 	KindKernelError = "kernel_error"
+	// KindJournalError is a userspace line from journald that matches a journal rule.
+	KindJournalError = "journal_error"
 	// KindServer is a problem of the lastgasp server itself, like database errors.
 	KindServer = "server"
 	// KindFlapping is a host that keeps rebooting or going silent. It holds back the alerts of those.
@@ -31,7 +33,7 @@ const (
 // ServerHost is the host name of server incidents. Agent hosts should not use it.
 const ServerHost = "@server"
 
-var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError, KindServer, KindFlapping}
+var kinds = []string{KindCrash, KindReboot, KindSilent, KindKernelError, KindJournalError, KindServer, KindFlapping}
 
 // Kinds lists every incident kind.
 func Kinds() []string { return slices.Clone(kinds) }
@@ -324,14 +326,17 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 			}
 			continue
 		}
-		if r.Source != "kmsg" && r.Source != "netconsole" {
-			continue
+		kind, rule := KindKernelError, (*Rule)(nil)
+		switch r.Source {
+		case "kmsg", "netconsole":
+			rule = rules.Match(r.Message)
+		case "journal":
+			kind, rule = KindJournalError, rules.MatchJournal(r.Message)
 		}
-		rule := rules.Match(r.Message)
 		if rule == nil {
 			continue
 		}
-		key := openKey(r.Host, r.BootID, KindKernelError, rule.Name)
+		key := openKey(r.Host, r.BootID, kind, rule.Name)
 		if inc := d.open[key]; inc != nil {
 			inc.Count++
 			inc.LastRecordID, inc.UpdatedAt = r.ID, now
@@ -339,7 +344,7 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 			d.dirty[inc.ID] = inc
 			continue
 		}
-		inc := &store.Incident{Host: r.Host, BootID: r.BootID, Kind: KindKernelError, Severity: rule.Severity,
+		inc := &store.Incident{Host: r.Host, BootID: r.BootID, Kind: kind, Severity: rule.Severity,
 			Rule: rule.Name, FirstRecordID: r.ID, LastRecordID: r.ID, Count: 1, Summary: r.Message, OpenedAt: now, UpdatedAt: now}
 		if rule.Count > 1 {
 			h := d.hits[key]
@@ -436,7 +441,8 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 		switch {
 		case inc.Kind == KindReboot && now.Sub(inc.OpenedAt) >= d.cfg.CrashWait:
 			reboots = append(reboots, pendingReboot{key: key, inc: inc, q: crashQuery{inc.Host, inc.BootID, inc.LastRecordID}})
-		case inc.Kind == KindKernelError && d.cfg.ResolveAfter > 0 && now.Sub(inc.UpdatedAt) >= d.cfg.ResolveAfter:
+		case (inc.Kind == KindKernelError || inc.Kind == KindJournalError) && d.cfg.ResolveAfter > 0 &&
+			now.Sub(inc.UpdatedAt) >= d.cfg.ResolveAfter:
 			inc.Summary += fmt.Sprintf(" (no new matching line for %s)", now.Sub(inc.UpdatedAt).Round(time.Second))
 			inc.Resolved = true
 			d.close(ctx, key, inc, now)
@@ -497,7 +503,7 @@ func (d *Detector) Tick(ctx context.Context, now time.Time) {
 		if inc.Kind == KindReboot {
 			d.lastReboot[inc.Host] = inc
 			// A clean reboot ends the problems of the old boot.
-			for _, k := range []string{KindKernelError, KindSilent} {
+			for _, k := range []string{KindKernelError, KindJournalError, KindSilent} {
 				if err := d.Store.ResolveKind(ctx, inc.Host, inc.BootID, k); err != nil {
 					d.Log.Error("save incident", "err", err)
 				}

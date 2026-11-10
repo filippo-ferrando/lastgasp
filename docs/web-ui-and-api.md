@@ -120,7 +120,7 @@ The `POST` and `DELETE` endpoints need the admin role, except login and logout. 
 | `host` | one host |
 | `boot` | one boot ID, as shown on incidents |
 | `level` | this level and more severe: 0 emerg, 1 alert, 2 crit, 3 err, 4 warning, 5 notice, 6 info |
-| `source` | `kmsg`, `pstore` or `netconsole` |
+| `source` | `kmsg`, `pstore`, `netconsole` or `journal` |
 | `q` | text contained in the message, case insensitive. `%` and `_` are plain characters |
 | `after_id` | records newer than this ID, oldest first. Good for following new lines |
 | `before_id` | records older than this ID. Good for paging back |

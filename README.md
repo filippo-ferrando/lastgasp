@@ -22,7 +22,8 @@ The agent assumes the worst: dead disk, broken DNS, no memory, kernel panic. It'
 - encrypts every line and sends it over UDP, one line per packet, with keys from a Noise handshake that change every 2 minutes, so a key stolen later cannot open old traffic
 - holds lines in memory until a server actually answers, so starting the agent before the server (or before you add its key) loses nothing
 - keeps each line until a server confirms it got it, and sends lost lines again
-- keeps unconfirmed lines in a RAM-only stash under `/run`, so an agent restart or upgrade does not lose them
+- keeps unconfirmed lines in a RAM-only stash under `/run`, so an agent restart or upgrade does not lose them, and in pmsg (ramoops), so a warm reboot does not either
+- can also send userspace lines from journald, on their own queue so they never hold back kernel lines
 - survives dead disks, DNS outages, OOM, journald hangs and its own bugs
 - installs in one line from the release page, and gets its own key with a join token (no key copying)
 
@@ -30,7 +31,8 @@ The agent assumes the worst: dead disk, broken DNS, no memory, kernel panic. It'
 
 - stores logs in SQLite or PostgreSQL, removes duplicates, and deletes old data by age, by level or by record count
 - counts missing, late and duplicate packets per machine, so you know when you're not seeing everything
-- turns crashes, reboots, silent hosts and kernel errors (panics, oopses, lockups, OOM kills, I/O errors...) into incidents
+- turns crashes, reboots, silent hosts and kernel errors (panics, oopses, lockups, OOM kills, I/O errors...) into incidents, notices hosts that keep rebooting, and sends one alert when many hosts go down at once
+- can take the kernel netconsole too, so a panic arrives while it happens, even without pstore
 - watches itself and opens incidents when its database, queue, alerts or keys have problems
 - sends alerts to webhooks (Slack, Mattermost, Alertmanager, or plain JSON with an HMAC signature), Telegram and email
 - incident workflow: acknowledge or resolve with a note, and silences for maintenance windows
@@ -132,7 +134,7 @@ I try to be honest about what it doesn't do (yet):
 - Lost lines are sent again only while they are still in the agent buffer (or its stash, after a restart). A long outage at full rate can still lose some (they show up as missing, at least).
 - A kernel panic stops everything instantly, the agent included. The panic message itself only reaches you through pstore, so set up a pstore backend (EFI or ramoops) on machines you care about.
 - On PostgreSQL, the size limit counts record rows only, not indexes or space waiting for vacuum.
-- Only kernel logs, no journald or syslog lines (yet).
+- Userspace logs come from journald only (`-journal`), not from plain syslog.
 - The web UI needs HTTPS in front of it (a reverse proxy) when used over the network.
 
 More in [docs/operations.md](docs/operations.md#known-limits) and [docs/open-work.md](docs/open-work.md). Issues and PRs are welcome!

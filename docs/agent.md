@@ -137,6 +137,10 @@ LASTGASP_KEY=4f1c...e9 lastgasp-agent -server 10.0.0.5:5140,10.0.0.6:5140 -hostn
 | `-stash` | /run/lastgasp/agent.stash | file that keeps unconfirmed records across agent restarts, empty to disable. Must be on tmpfs or ramfs, see [The stash](#the-stash) |
 | `-stash-size` | 8 MiB | stash size in bytes, 64 KiB to 1 GiB |
 | `-pmsg` | /dev/pmsg0 | pmsg device that keeps unconfirmed records across a warm reboot, empty to disable. See [Across a reboot](#across-a-reboot) |
+| `-journal` | false | also send userspace lines from journald, see [Userspace logs](#userspace-logs). The server must be v0.1.6 or newer |
+| `-journal-priority` | warning | journal lines of this level and more severe: emerg, alert, crit, err, warning, notice, info, debug |
+| `-journal-rate` | 200 | journal lines per second at most, the rest are dropped and counted. 0 for no limit |
+| `-journal-buffer` | 4096 | journal lines kept in memory while servers are unreachable |
 | `-pmsg-max` | 64 KiB | bytes written to `-pmsg` on stop at most, the newest records are kept. Up to 1 MiB |
 | `-version` | | print the version and exit. The agent also sends its version in every heartbeat, shown in the Hosts table |
 
@@ -162,6 +166,18 @@ When the agent stops, it writes the kernel lines no server confirmed yet to `/de
 - A cold boot (power off) loses the RAM, and so the records.
 - Only kernel lines are written, as pstore lines are still in pstore anyway.
 - In Kubernetes, the agent pod sees `/dev/pmsg0` only when it is mounted like `/dev/kmsg`.
+
+## Userspace logs
+
+With `-journal`, the agent also sends lines from journald: failed units, core dumps, services that log errors. It runs `journalctl --follow` and reads its JSON output.
+
+- Journal lines have their own queue, sent after kernel lines, and their own rate limit. A stuck or slow journald only stops journal lines, never kernel ones.
+- On start, the agent sends the journal of the whole boot from `-journal-priority` up, so lines from before it started are not missed. After an agent restart it sends them again, and the server drops the ones it has.
+- Kernel lines in the journal are skipped, as kmsg sends them already.
+- Each line starts with the unit or program name, like `nginx.service: ...`, and has the source `journal` on the server.
+- Journal lines are not kept in the stash or in pmsg: journald keeps them itself.
+- `journalctl` is looked up at start. Without it, `-journal` stops the agent with an error.
+- Servers before v0.1.6 refuse journal packets as malformed. Upgrade the server first.
 
 ## The systemd unit
 

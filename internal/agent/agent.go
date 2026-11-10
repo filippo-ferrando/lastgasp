@@ -39,6 +39,11 @@ type Config struct {
 	// PmsgPath is the pmsg device that keeps unconfirmed records across a warm reboot, empty to disable.
 	PmsgPath string
 	PmsgMax  int
+	// Journal is the journalctl command whose userspace lines are sent too, empty to disable.
+	Journal         string
+	JournalPriority int // lines up to this level, 0 to 7
+	JournalRate     int // lines per second at most
+	JournalBuffer   int // lines kept in memory while servers are unreachable
 }
 
 // MaxBuffer bounds -buffer, as all slots are allocated and locked in memory at start.
@@ -63,6 +68,10 @@ func (c *Config) Validate() error {
 		return errors.New("wait-ack needs heartbeats, set -heartbeat or -wait-ack=false")
 	case c.ResolveEvery < time.Second:
 		return errors.New("resolve-every must be at least 1s")
+	case c.Journal != "" && (c.JournalPriority < 0 || c.JournalPriority > 7):
+		return errors.New("journal-priority must be between 0 and 7")
+	case c.Journal != "" && (c.JournalBuffer < 1 || c.JournalBuffer > MaxBuffer || c.JournalRate < 0):
+		return fmt.Errorf("journal-buffer must be between 1 and %d, journal-rate not negative", MaxBuffer)
 	case c.PmsgPath != "" && (c.PmsgMax < 0 || c.PmsgMax > 1<<20):
 		return errors.New("pmsg-max must be between 0 and 1048576 bytes")
 	case c.StashPath != "" && (c.StashSize < MinStash || c.StashSize > MaxStash):
@@ -169,6 +178,18 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 		Rate: cfg.Rate, Heartbeat: cfg.Heartbeat, WaitAck: cfg.WaitAck, ForwardSecrecy: cfg.ForwardSecrecy, Version: version.String(),
 		PmsgPath: cfg.PmsgPath, PmsgMax: cfg.PmsgMax,
 	}
+	var journal *JournalReader
+	if cfg.Journal != "" {
+		sender.Journal = NewQueue(cfg.JournalBuffer)
+		journal = &JournalReader{Command: cfg.Journal, Priority: cfg.JournalPriority, Rate: cfg.JournalRate, Stats: stats, Log: log,
+			Push: func(e Entry, id uint64) {
+				for _, it := range split(wire.KindJournal, e, 0, id) {
+					if sender.Journal.Push(it) {
+						stats.BufferDrops.Add(1)
+					}
+				}
+			}}
+	}
 	if cfg.ForwardSecrecy && !sender.fs() {
 		log.Printf("agent: forward secrecy needs -wait-ack and -heartbeat, sending version 4 packets without it")
 	}
@@ -188,6 +209,9 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 		"sender":   sender.Run,
 		"kmsg":     kmsg.Run,
 		"resolver": func(ctx context.Context) { res.Run(ctx, cfg.ResolveEvery, log) },
+	}
+	if journal != nil {
+		workers["journal"] = journal.Run
 	}
 	done := make(chan string, len(workers))
 	for name, fn := range workers {

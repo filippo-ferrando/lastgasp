@@ -311,7 +311,8 @@ func Headline(inc *store.Incident, resolved bool) string {
 		return fmt.Sprintf("[%s] lastgasp server: %s problem", inc.Severity, inc.Rule)
 	}
 	what := map[string]string{KindCrash: "crashed", KindReboot: "rebooted", KindSilent: "went silent",
-		KindKernelError: "kernel error (" + inc.Rule + ")", KindFlapping: "keeps rebooting or going silent"}[inc.Kind]
+		KindKernelError: "kernel error (" + inc.Rule + ")", KindJournalError: "journal error (" + inc.Rule + ")",
+		KindFlapping: "keeps rebooting or going silent"}[inc.Kind]
 	if what == "" {
 		what = inc.Kind
 	}
@@ -323,6 +324,8 @@ func Headline(inc *store.Incident, resolved bool) string {
 			what = "is sending again"
 		case KindKernelError:
 			what = "kernel error (" + inc.Rule + ") is over"
+		case KindJournalError:
+			what = "journal error (" + inc.Rule + ") is over"
 		case KindFlapping:
 			what = "is stable again"
 		}

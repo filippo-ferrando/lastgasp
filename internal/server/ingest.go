@@ -411,6 +411,10 @@ func (in *Ingestor) process(ctx context.Context, batch []inbound) {
 			}
 			rec.BootID = b
 			rec.DedupKey = "p|" + p.Host + "|" + fileID + "|" + strconv.FormatUint(r.Seq, 10) + "|" + strconv.Itoa(int(r.Part))
+		case wire.KindJournal:
+			// The file ID holds a hash of the journal cursor, the same for a line sent again after a restart.
+			rec.Source = "journal"
+			rec.DedupKey = "j|" + p.Host + "|" + boot + "|" + strconv.FormatUint(r.FileID, 16) + "|" + strconv.Itoa(int(r.Part))
 		}
 		rec.ContentKey = contentKey(rec)
 		recs = append(recs, rec)

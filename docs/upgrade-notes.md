@@ -4,6 +4,7 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- Agents can send userspace lines from journald with `-journal` (off by default). Upgrade the server before turning it on: older servers refuse these packets. New incident kind `journal_error` and journal rules `coredump` and `unit_failed`. Rules files take `@journal` after the severity.
 - The server can take extended netconsole lines (`-netconsole-listen`, `-netconsole-from`, `-netconsole-hosts`), so a panic arrives during the panic, without pstore. Records get the new source `netconsole`. See [server.md](server.md#netconsole).
 - The agent writes records no server confirmed to `/dev/pmsg0` when it stops (`-pmsg`, `-pmsg-max`), and the next boot sends them from pstore. Nothing changes on machines without a ramoops pmsg zone.
 - Reboots or silent incidents of 3 or more hosts within 2 minutes form a group and get one alert per target (`-group-min-hosts`, `-group-window`). The other members get the alert state `grouped`. Incidents have a new `group_id` field; the schema upgrade adds the column on start. Set `-group-min-hosts 0` to keep one alert per host.

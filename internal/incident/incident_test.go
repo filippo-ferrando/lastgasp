@@ -75,6 +75,20 @@ func TestParseRules(t *testing.T) {
 	if m := DefaultRules().Match("EDAC MC0: 1 CE x"); m == nil || m.Count != 10 || m.Window != time.Hour {
 		t.Fatalf("built-in rate: %+v", m)
 	}
+	r, err = ParseRules(strings.NewReader("ssh_fail warning @journal 5/1m sshd.*Failed password\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := "sshd.service: Failed password for root"
+	if m := r.MatchJournal(msg); m == nil || m.Name != "ssh_fail" || m.Count != 5 || r.Match(msg) != nil {
+		t.Fatalf("journal rule: %+v", m)
+	}
+	if m := r.MatchJournal("systemd-coredump: Process 812 (nginx) of user 33 dumped core."); m == nil || m.Name != "coredump" {
+		t.Fatalf("coredump: %+v", m)
+	}
+	if m := r.Match("Process 812 (nginx) of user 33 dumped core."); m != nil {
+		t.Fatalf("journal rule matched a kernel line: %+v", m)
+	}
 	for _, bad := range []string{"x", "x loud abc", "x warning (", "x warning", "x warning 0/1h abc", "x warning 5/1y abc"} {
 		if _, err := ParseRules(strings.NewReader(bad)); err == nil {
 			t.Errorf("%q accepted", bad)

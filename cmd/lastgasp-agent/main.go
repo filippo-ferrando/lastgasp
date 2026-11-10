@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +18,9 @@ import (
 	"lastgasp/internal/version"
 	"lastgasp/internal/wire"
 )
+
+// journalLevels are the syslog level names, by number.
+var journalLevels = []string{"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "enroll" {
@@ -41,6 +46,10 @@ func main() {
 		stashSize = flag.Int("stash-size", 8<<20, "stash size in bytes")
 		pmsg      = flag.String("pmsg", "/dev/pmsg0", "pmsg device that keeps unconfirmed records across a warm reboot, empty to disable")
 		pmsgMax   = flag.Int("pmsg-max", 64<<10, "bytes written to -pmsg on stop at most")
+		journal   = flag.Bool("journal", false, "also send userspace lines from journald (the server must be v0.1.6 or newer)")
+		jPrio     = flag.String("journal-priority", "warning", "send journal lines of this level and more severe: emerg, alert, crit, err, warning, notice, info, debug")
+		jRate     = flag.Int("journal-rate", 200, "max journal lines per second, 0 for no limit")
+		jBuffer   = flag.Int("journal-buffer", 4096, "journal lines kept in memory while servers are unreachable")
 		showVer   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -55,6 +64,18 @@ func main() {
 		DNSServer: *dns, KmsgPath: *kmsg, PstoreDir: *pstore, BootIDPath: *bootID,
 		BufferSize: *buffer, Rate: *rate, Heartbeat: *heartbeat, WaitAck: *waitAck, ForwardSecrecy: *fsec, ResolveEvery: *resolve, MaxPstoreFile: 1 << 20,
 		StashPath: *stash, StashSize: *stashSize, PmsgPath: *pmsg, PmsgMax: *pmsgMax,
+		JournalRate: *jRate, JournalBuffer: *jBuffer,
+	}
+	if *journal {
+		// Found now, while the disk works. A missing journalctl stops the agent at start.
+		path, err := exec.LookPath("journalctl")
+		if err != nil {
+			fatal("-journal: %v", err)
+		}
+		cfg.Journal = path
+	}
+	if cfg.JournalPriority = slices.Index(journalLevels, *jPrio); cfg.JournalPriority < 0 {
+		fatal("-journal-priority must be one of %s", strings.Join(journalLevels, ", "))
 	}
 	for _, s := range strings.Split(*servers, ",") {
 		if s = strings.TrimSpace(s); s != "" {

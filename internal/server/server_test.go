@@ -298,6 +298,31 @@ func TestPmsgRecordsMatchKmsg(t *testing.T) {
 	}
 }
 
+func TestJournalLines(t *testing.T) {
+	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
+	journal := func(inst, seq, id uint64, msg string) *wire.Packet {
+		return &wire.Packet{Host: "node-1", BootID: [16]byte{0xa}, Instance: inst, Seq: seq, Kind: wire.KindJournal,
+			Record: wire.Record{Priority: 3<<3 | 4, TsUsec: 5, FileID: id, Part: 1, Parts: 1, Msg: msg}}
+	}
+	e.send(t, journal(1, 1, 0xabc, "systemd-coredump: Process 812 (nginx) of user 33 dumped core."))
+	// After an agent restart the journal is read from the start of the boot again: the line is stored once.
+	e.send(t, journal(2, 1, 0xabc, "systemd-coredump: Process 812 (nginx) of user 33 dumped core."))
+	e.send(t, journal(2, 2, 0xabd, "app: fine"))
+	recs := e.waitRecords(t, 2)
+	if recs[0].Source != "journal" || recs[0].Level != 4 || recs[0].Facility != 3 {
+		t.Fatalf("records %+v", recs)
+	}
+	l, _ := e.st.Incidents(context.Background(), store.IncidentFilter{Kind: incident.KindJournalError})
+	if len(l) != 1 || l[0].Rule != "coredump" {
+		t.Fatalf("incidents %+v", l)
+	}
+	var v IncidentView
+	json.Unmarshal([]byte(e.get(t, "/api/incidents/"+strconv.FormatInt(l[0].ID, 10))), &v)
+	if len(v.Records) != 1 || v.Records[0].Source != "journal" {
+		t.Fatalf("view %+v", v.Records)
+	}
+}
+
 func TestBadPacketsAreCounted(t *testing.T) {
 	e := newEnv(t, filepath.Join(t.TempDir(), "db"))
 	b, _ := wire.Encode(kmsgPkt(1, 1, 1, 0, 0, "x"), bytes.Repeat([]byte{2}, 32))

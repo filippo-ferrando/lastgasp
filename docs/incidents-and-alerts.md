@@ -7,6 +7,7 @@ The server turns the moments that matter into incidents, one per host, boot, kin
 | Kind | Opened when | Closed when | Severity |
 | --- | --- | --- | --- |
 | `kernel_error` | a kernel line matches a rule. Lines of the same rule and boot are grouped and counted | `-resolve-after` without a new matching line (resolved), or a clean reboot | from the rule |
+| `journal_error` | a journal line (agents with `-journal`) matches a journal rule. Grouped and closed like `kernel_error` | like `kernel_error` | from the rule |
 | `silent` | no packet for `-silent-after` | the host sends again (resolved), or a clean reboot | warning |
 | `reboot` | a new boot ID shows up. Open incidents of the old boot are closed | after `-crash-wait`, when the crash check finds nothing | info |
 | `crash` | a reboot where the old boot left pstore lines, or its last kernel lines match a critical rule | never resolved | critical |
@@ -80,6 +81,10 @@ A rule has a name, a severity, an optional count and a regular expression ([Go s
 | `io_error` | warning | `I/O error, dev `, `Buffer I/O error` |
 | `fs_error` | warning | `EXT4-fs error`, XFS corruption or metadata I/O error, `BTRFS error` or `critical` |
 | `nvme` | warning | NVMe I/O timeout, `controller is down` |
+| `coredump` | warning, journal | `Process N (name) of user N dumped core` or `terminated abnormally` |
+| `unit_failed` | warning, journal | `: Failed with result '`, a systemd unit that failed |
+
+Rules marked journal match userspace lines from journald, which start with the unit or program name. The others match kernel lines. In a rules file, `@journal` after the severity makes a journal rule.
 
 A rules file (`-rules`) adds, replaces or removes rules, one per line:
 
@@ -89,6 +94,7 @@ raid        warning   md/raid\d+:.*: Disk failure
 io_error    critical  I/O error, dev nvme
 link_down   info      (eth|en)\w+: Link is Down
 link_flap   warning   5/10m (eth|en)\w+: Link is Up
+ssh_fail    warning   @journal 10/5m sshd.*: Failed password
 oom         off
 ```
 

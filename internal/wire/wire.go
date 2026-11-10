@@ -57,6 +57,9 @@ const (
 	KindHeartbeat Kind = 3
 	// KindAck goes from the server to the agent and answers a heartbeat.
 	KindAck Kind = 4
+	// KindJournal is a userspace line from journald. FileID holds a hash of its journal cursor.
+	// Servers before it refuse the packet, so agents send it only when asked to.
+	KindJournal Kind = 5
 )
 
 func (k Kind) String() string {
@@ -69,6 +72,8 @@ func (k Kind) String() string {
 		return "heartbeat"
 	case KindAck:
 		return "ack"
+	case KindJournal:
+		return "journal"
 	}
 	return fmt.Sprintf("kind(%d)", k)
 }
@@ -92,7 +97,7 @@ type Packet struct {
 	Seq      uint64
 	SentAt   int64 // unix nanoseconds
 	Kind     Kind
-	Record   Record // for KindKmsg and KindPstore
+	Record   Record // for KindKmsg, KindPstore and KindJournal
 	Stats    Stats  // for KindHeartbeat
 	// Oldest is the lowest seq the agent can still send again, for KindHeartbeat since version 3.
 	// Packets below it that never arrived are lost for good.
@@ -386,7 +391,7 @@ func encodeInner(p *Packet, ver uint8) ([]byte, error) {
 	b = binary.BigEndian.AppendUint64(b, p.Seq)
 	b = binary.BigEndian.AppendUint64(b, uint64(p.SentAt))
 	switch p.Kind {
-	case KindKmsg, KindPstore:
+	case KindKmsg, KindPstore, KindJournal:
 		r := &p.Record
 		if len(r.Msg) > MaxPacket {
 			return nil, ErrTooLarge
@@ -487,7 +492,7 @@ func decodeInner(p *Packet, inner []byte) error {
 	p.Seq = r.u64()
 	p.SentAt = int64(r.u64())
 	switch p.Kind {
-	case KindKmsg, KindPstore:
+	case KindKmsg, KindPstore, KindJournal:
 		rec := &p.Record
 		rec.Priority = r.u16()
 		rec.Seq = r.u64()

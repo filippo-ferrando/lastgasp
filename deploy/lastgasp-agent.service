@@ -3,12 +3,16 @@ Description=lastgasp kernel log agent
 # Start early, before most of the system, so boot messages are captured.
 DefaultDependencies=no
 After=systemd-modules-load.service
-Before=sysinit.target shutdown.target
+# The agent reads pstore before it tells systemd it is ready, and systemd-pstore moves the files away.
+Before=sysinit.target shutdown.target systemd-pstore.service
 Conflicts=shutdown.target
 # Never stop restarting, however often the agent fails. This key belongs in [Unit].
 StartLimitIntervalSec=0
 
 [Service]
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30s
 # deploy/install-agent.sh replaces this line with a drop-in holding the real flags.
 ExecStart=/usr/local/sbin/lastgasp-agent -server logs.example.net:5140 -key-file /etc/lastgasp/agent.key
 Restart=always

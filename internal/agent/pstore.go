@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PstoreLine is one line saved by the kernel in pstore before the last reboot.
@@ -47,21 +51,71 @@ func ReadPstore(dir string, maxSize int64) ([]PstoreLine, error) {
 	sort.Slice(ents, func(i, j int) bool { return ents[i].Name() < ents[j].Name() })
 	var out []PstoreLine
 	for _, e := range ents {
-		if !e.Type().IsRegular() || !pstoreFile(e.Name()) {
-			continue
+		if e.Type().IsRegular() && pstoreFile(e.Name()) {
+			out = append(out, readPstoreFile(filepath.Join(dir, e.Name()), maxSize)...)
 		}
-		f, err := os.Open(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		data, err := io.ReadAll(io.LimitReader(f, maxSize))
-		f.Close()
-		if err != nil || len(data) == 0 {
-			continue
-		}
-		out = append(out, ParsePstore(data)...)
 	}
 	return out, nil
+}
+
+func readPstoreFile(path string, maxSize int64) []PstoreLine {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxSize))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	return ParsePstore(data)
+}
+
+// ReadPstoreArchive reads the files systemd-pstore moved from pstore into dir since the given time,
+// the start of this boot. It keeps dmesg records in one directory per crash, as dmesg.txt.
+func ReadPstoreArchive(dir string, since time.Time, maxSize int64) ([]PstoreLine, error) {
+	var out []PstoreLine
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == dir {
+				return err
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if path != dir && strings.Count(strings.TrimPrefix(path, dir), string(filepath.Separator)) > 1 {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || (!pstoreFile(d.Name()) && d.Name() != "dmesg.txt") {
+			return nil
+		}
+		if info, err := d.Info(); err != nil || info.ModTime().Before(since) {
+			return nil
+		}
+		out = append(out, readPstoreFile(path, maxSize)...)
+		return nil
+	})
+	return out, err
+}
+
+// BootTime returns when this boot started, from the btime line of /proc/stat.
+func BootTime() (time.Time, error) {
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "btime "); ok {
+			s, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				return time.Time{}, err
+			}
+			return time.Unix(s, 0), nil
+		}
+	}
+	return time.Time{}, errors.New("no btime in /proc/stat")
 }
 
 // FileID fingerprints a pstore file by content, so the same file sent after many reboots keeps its ID.
@@ -138,7 +192,7 @@ func parsePstoreLine(line string) (e Entry, ok bool) {
 		if end := strings.IndexByte(rest, ']'); end > 0 {
 			if ts, tsOK := parseTimestamp(rest[1:end]); tsOK {
 				e.TsUsec = ts
-				rest = strings.TrimPrefix(rest[end+1:], " ")
+				rest = stripCaller(strings.TrimPrefix(rest[end+1:], " "))
 				ok = hasPrio
 			}
 		}
@@ -146,6 +200,12 @@ func parsePstoreLine(line string) (e Entry, ok bool) {
 	e.Msg = rest
 	return e, ok
 }
+
+// callerRe matches the caller ID that kernels with CONFIG_PRINTK_CALLER print after the time, like "[ T2048] ".
+var callerRe = regexp.MustCompile(`^\[ *[TC]\d+\] ?`)
+
+// stripCaller removes the caller ID, which /dev/kmsg does not show, so the line matches its kmsg copy.
+func stripCaller(s string) string { return s[len(callerRe.FindString(s)):] }
 
 // parseTimestamp reads "   12.345678" as microseconds.
 func parseTimestamp(s string) (uint64, bool) {

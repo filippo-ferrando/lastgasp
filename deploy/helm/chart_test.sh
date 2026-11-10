@@ -27,7 +27,7 @@ $HELM lint "$CHART" > "$TMP/lint" 2>&1 || fail "lint: $(cat "$TMP/lint")"
 render default
 d="$TMP/default"
 for s in "kind: DaemonSet" "kind: Deployment" "kind: PersistentVolumeClaim" "name: lg-lastgasp-udp" "name: lg-lastgasp-http" \
-	"privileged: true" "path: /dev/kmsg" "type: CharDevice" "path: /sys/fs/pstore" "path: /run/lastgasp" \
+	"privileged: true" "path: /dev/kmsg" "type: CharDevice" "path: /sys/fs/pstore" "path: /var/lib/systemd/pstore" "path: /run/lastgasp" \
 	"- -hostname=\$(NODE_NAME)" "fieldPath: spec.nodeName" "- -server=lg-lastgasp-udp.mon.svc.cluster.local.:5140" \
 	"- operator: Exists" "priorityClassName: system-node-critical" "replicas: 1" "type: Recreate" \
 	"- -db=/var/lib/lastgasp/lastgasp.db" "- -key-file=/etc/lastgasp/key/keys" "protocol: UDP"; do
@@ -162,6 +162,7 @@ has "$TMP/server.yaml" "- -require-forward-secrecy"
 has "$TMP/agent.yaml" "- -forward-secrecy=false"
 has "$TMP/agent.yaml" "- -pstore="
 hasnot "$TMP/agent.yaml" "path: /sys/fs/pstore"
+hasnot "$TMP/agent.yaml" "path: /var/lib/systemd/pstore"
 
 [ "$fails" -eq 0 ] || exit 1
 echo "ok  	chart"

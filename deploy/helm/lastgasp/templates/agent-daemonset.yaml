@@ -138,6 +138,10 @@ spec:
             - name: pstore
               mountPath: /sys/fs/pstore
               readOnly: true
+            # systemd-pstore on the node moves the files here at boot, long before the pod starts.
+            - name: pstore-archive
+              mountPath: /var/lib/systemd/pstore
+              readOnly: true
             {{- end }}
             {{- if $a.stash }}
             - name: stash
@@ -176,6 +180,10 @@ spec:
           hostPath:
             path: /sys/fs/pstore
             type: Directory
+        - name: pstore-archive
+          hostPath:
+            path: /var/lib/systemd/pstore
+            type: DirectoryOrCreate
         {{- end }}
         {{- if $a.stash }}
         # /run on the node is tmpfs, and the stash outlives the pod.

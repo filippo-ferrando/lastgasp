@@ -33,6 +33,7 @@ func main() {
 		dns       = flag.String("dns", "", "DNS server ip:port to use instead of /etc/resolv.conf")
 		kmsg      = flag.String("kmsg", "/dev/kmsg", "kernel log device")
 		pstore    = flag.String("pstore", "/sys/fs/pstore", "pstore directory, empty to disable")
+		archive   = flag.String("pstore-archive", "/var/lib/systemd/pstore", "where systemd-pstore moves pstore files, those moved in this boot are read too. Empty to disable")
 		bootID    = flag.String("boot-id", "/proc/sys/kernel/random/boot_id", "boot id file")
 		buffer    = flag.Int("buffer", 16384, "records kept in memory while servers are unreachable")
 		rate      = flag.Int("rate", 2000, "max packets per second, 0 for no limit")
@@ -61,7 +62,7 @@ func main() {
 
 	// Everything is read at start, while the disk still works.
 	cfg := agent.Config{
-		DNSServer: *dns, KmsgPath: *kmsg, PstoreDir: *pstore, BootIDPath: *bootID,
+		DNSServer: *dns, KmsgPath: *kmsg, PstoreDir: *pstore, PstoreArchive: *archive, BootIDPath: *bootID,
 		BufferSize: *buffer, Rate: *rate, Heartbeat: *heartbeat, WaitAck: *waitAck, ForwardSecrecy: *fsec, ResolveEvery: *resolve, MaxPstoreFile: 1 << 20,
 		StashPath: *stash, StashSize: *stashSize, PmsgPath: *pmsg, PmsgMax: *pmsgMax,
 		JournalRate: *jRate, JournalBuffer: *jBuffer,

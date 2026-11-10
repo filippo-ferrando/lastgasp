@@ -52,6 +52,7 @@ Machines outside the cluster can use their own keys: add `host hexkey` lines wit
 | `privileged: true` | the container runtime allows `/dev/kmsg` only to privileged containers. It also gives `CAP_SYSLOG` and `CAP_IPC_LOCK` for reading the log and locking memory |
 | hostPath `/dev/kmsg`, read only | the kernel log of the node. Left out with `agent.kmsgHostPath: false` |
 | hostPath `/sys/fs/pstore`, read only | crash logs from the previous boot. Turn off with `agent.pstore: false` on nodes without pstore, or the pod does not start |
+| hostPath `/var/lib/systemd/pstore`, read only | where `systemd-pstore` moves the pstore files at boot, before the pod starts. The agent reads those moved in this boot |
 | hostPath `/dev/pmsg0`, with `agent.pmsg` | unconfirmed records across a warm reboot, see [pmsg](#pmsg) |
 | hostPath journal, with `agent.journal.enabled` | userspace lines, see [Journal](#journal) |
 | hostPath `/run/lastgasp` | the stash. `/run` on the node is tmpfs, so unconfirmed records survive an agent restart or upgrade but not a reboot |
@@ -177,6 +178,8 @@ modprobe netconsole
 - The server must be v0.1.6 or newer.
 
 ## pmsg
+
+Most distribution kernels are built without pmsg (`CONFIG_PSTORE_PMSG`): AlmaLinux, Rocky, Fedora, Debian and Ubuntu leave it out, openSUSE has it. Check with `grep PSTORE_PMSG /boot/config-$(uname -r)` before turning this on.
 
 `agent.pmsg: true` mounts `/dev/pmsg0` from the node, so records still unconfirmed when a node reboots are sent again by the next boot (see [agent.md](agent.md#across-a-reboot)). Every node needs ramoops with a pmsg zone, or the pod does not start. A non privileged agent also needs the device allowed, through a device plugin like for `/dev/kmsg`; without it, the agent logs that it cannot write and goes on.
 

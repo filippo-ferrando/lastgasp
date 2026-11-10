@@ -4,6 +4,8 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- Fixed: `systemd-pstore.service` moved pstore files away before the agent read them, so crash logs were lost on systemd distributions, and always in Kubernetes. The agent unit is now `Type=notify` and runs before `systemd-pstore`, and the agent also reads the files moved in this boot from `/var/lib/systemd/pstore` (`-pstore-archive`; the Helm chart mounts it). Install the new unit together with the new agent: an older agent never reports ready to a `Type=notify` unit. `install-agent.sh` installs both.
+- Fixed: pstore lines from kernels with `CONFIG_PRINTK_CALLER` kept the caller ID (`[ T2048]`), so they were not matched with their kmsg copy.
 - Helm chart: new values `server.incidents.*`, `server.netconsole.*`, `agent.pmsg` and `agent.journal.*`, all off apart from the incident defaults. A new image, `lastgasp-agent-journal`, is used with `agent.journal.enabled`. See [kubernetes.md](kubernetes.md).
 - Agents can send userspace lines from journald with `-journal` (off by default). Upgrade the server before turning it on: older servers refuse these packets. New incident kind `journal_error` and journal rules `coredump` and `unit_failed`. Rules files take `@journal` after the severity.
 - The server can take extended netconsole lines (`-netconsole-listen`, `-netconsole-from`, `-netconsole-hosts`), so a panic arrives during the panic, without pstore. Records get the new source `netconsole`. See [server.md](server.md#netconsole).

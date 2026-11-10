@@ -742,3 +742,57 @@ func TestConfigValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePstoreDropsCallerID(t *testing.T) {
+	lines := ParsePstore([]byte("<4>[    5.100000] [ T2048] marker\n<6>[    5.200000] [    C1] cpu line\n[    5.300000] [T7] console line\n"))
+	if len(lines) != 3 || lines[0].Msg != "marker" || lines[1].Msg != "cpu line" || lines[2].Msg != "console line" {
+		t.Fatalf("lines %+v", lines)
+	}
+}
+
+func TestReadPstoreArchive(t *testing.T) {
+	dir := t.TempDir()
+	boot := time.Now().Add(-time.Hour)
+	write := func(name, content string, mtime time.Time) {
+		p := filepath.Join(dir, name)
+		os.MkdirAll(filepath.Dir(p), 0o700)
+		os.WriteFile(p, []byte(content), 0o600)
+		os.Chtimes(p, mtime, mtime)
+	}
+	write("pmsg-ramoops-0", "moved this boot\n", time.Now())
+	write("console-ramoops-0", "moved in an older boot\n", boot.Add(-time.Hour))
+	write("171234/dmesg.txt", "<0>[    5.000000] Kernel panic - not syncing: x\n", time.Now())
+	write("171234/deeper/dmesg-ramoops-0", "too deep\n", time.Now())
+	write("notes.txt", "not a pstore file\n", time.Now())
+	lines, err := ReadPstoreArchive(dir, boot, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, l := range lines {
+		got = append(got, l.Msg)
+	}
+	if fmt.Sprint(got) != "[Kernel panic - not syncing: x moved this boot]" {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := ReadPstoreArchive(filepath.Join(dir, "none"), boot, 1<<20); !os.IsNotExist(err) {
+		t.Fatalf("missing dir: %v", err)
+	}
+}
+
+func TestNotifyReady(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "notify")
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sock, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	t.Setenv("NOTIFY_SOCKET", sock)
+	notifyReady(NewLogger(io.Discard, 10))
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil || string(buf[:n]) != "READY=1" {
+		t.Fatalf("got %q %v", buf[:n], err)
+	}
+}

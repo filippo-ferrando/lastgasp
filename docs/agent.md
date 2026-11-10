@@ -136,6 +136,7 @@ LASTGASP_KEY=4f1c...e9 lastgasp-agent -server 10.0.0.5:5140,10.0.0.6:5140 -hostn
 | `-memory-limit` | 64 MiB | soft Go memory limit in bytes |
 | `-stash` | /run/lastgasp/agent.stash | file that keeps unconfirmed records across agent restarts, empty to disable. Must be on tmpfs or ramfs, see [The stash](#the-stash) |
 | `-stash-size` | 8 MiB | stash size in bytes, 64 KiB to 1 GiB |
+| `-pstore-archive` | /var/lib/systemd/pstore | where `systemd-pstore` moves pstore files. Files it moved in this boot are read too. Empty to disable |
 | `-pmsg` | /dev/pmsg0 | pmsg device that keeps unconfirmed records across a warm reboot, empty to disable. See [Across a reboot](#across-a-reboot) |
 | `-journal` | false | also send userspace lines from journald, see [Userspace logs](#userspace-logs). The server must be v0.1.6 or newer |
 | `-journal-priority` | warning | journal lines of this level and more severe: emerg, alert, crit, err, warning, notice, info, debug |
@@ -162,6 +163,7 @@ The stash fixes this without touching a disk. Every record the agent queues is a
 
 When the agent stops, it writes the kernel lines no server confirmed yet to `/dev/pmsg0`, also when no server answered at all. With a `ramoops` backend, the kernel keeps them in reserved RAM across a warm reboot, and the next boot finds them in `/sys/fs/pstore/pmsg-ramoops-0`. The agent reads them like other pstore files, with their original level, time and part, and the server stores those that did not arrive before, under the boot they belong to.
 
+- It needs a kernel built with `CONFIG_PSTORE_PMSG`. Most distribution kernels leave it out (AlmaLinux, Rocky, Fedora, Debian, Ubuntu), openSUSE has it.
 - It needs `ramoops` with a pmsg zone, for example `ramoops.mem_address=... ramoops.mem_size=0x200000 ramoops.pmsg_size=0x20000`. EFI and ERST backends have no pmsg. Without `/dev/pmsg0` the agent writes nothing and logs nothing.
 - A cold boot (power off) loses the RAM, and so the records.
 - Only kernel lines are written, as pstore lines are still in pstore anyway.
@@ -174,10 +176,14 @@ With `-journal`, the agent also sends lines from journald: failed units, core du
 - Journal lines have their own queue, sent after kernel lines, and their own rate limit. A stuck or slow journald only stops journal lines, never kernel ones.
 - On start, the agent sends the journal of the whole boot from `-journal-priority` up, so lines from before it started are not missed. After an agent restart it sends them again, and the server drops the ones it has.
 - Kernel lines in the journal are skipped, as kmsg sends them already.
-- Each line starts with the unit or program name, like `nginx.service: ...`, and has the source `journal` on the server.
+- Each line starts with the program name, like `sshd: ...` or `systemd: nginx.service: ...`, and has the source `journal` on the server.
 - Journal lines are not kept in the stash or in pmsg: journald keeps them itself.
 - `journalctl` is looked up at start. Without it, `-journal` stops the agent with an error.
 - Servers before v0.1.6 refuse journal packets as malformed. Upgrade the server first.
+
+## pstore and systemd-pstore
+
+`systemd-pstore.service`, enabled on most systemd distributions, moves pstore files to `/var/lib/systemd/pstore` early at boot, so they are gone from `/sys/fs/pstore`. The agent unit is `Type=notify` and runs before `systemd-pstore`: systemd waits until the agent has read pstore. Files moved anyway, for example when the agent runs in a container started later, are read from `-pstore-archive`, but only those moved during this boot.
 
 ## The systemd unit
 
@@ -187,6 +193,7 @@ With `-journal`, the agent also sends lines from journald: failed units, core du
 - restarts forever, one second apart (`Restart=always`, `StartLimitIntervalSec=0`)
 - is never chosen by the OOM killer (`OOMScoreAdjust=-1000`)
 - may lock unlimited memory (`LimitMEMLOCK=infinity`)
+- is `Type=notify` and runs before `systemd-pstore.service`, so pstore files are read before they are moved. It needs an agent of v0.1.6 or newer: an older agent never says it is ready, and systemd stops it after 30 seconds
 
 ## Sizing
 

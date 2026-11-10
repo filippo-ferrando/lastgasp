@@ -18,6 +18,12 @@ func TestParseJournal(t *testing.T) {
 	if !ok || cursor != "s=1;i=2" || id == 0 || e.Priority != 4<<3|3 || e.TsUsec != 1234 || e.Msg != `sshd.service: bad\x09login` {
 		t.Fatalf("got %+v %x %q %v", e, id, cursor, ok)
 	}
+	// The program name comes first: PID 1 logs as init.scope.
+	e, _, _, ok = parseJournal([]byte(`{"__CURSOR":"c","MESSAGE":"x.service: Failed with result 'exit-code'.",` +
+		`"SYSLOG_IDENTIFIER":"systemd","_SYSTEMD_UNIT":"init.scope"}`))
+	if !ok || e.Msg != "systemd: x.service: Failed with result 'exit-code'." {
+		t.Fatalf("got %+v %x %q %v", e, id, cursor, ok)
+	}
 	// A message that is not UTF-8 comes as an array of bytes. Without a unit, the program name is used.
 	e, _, _, ok = parseJournal([]byte(`{"__CURSOR":"c2","MESSAGE":[104,105,255],"SYSLOG_IDENTIFIER":"app"}`))
 	if !ok || e.Msg != `app: hi\xff` || e.Priority != 3<<3|6 {

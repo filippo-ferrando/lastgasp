@@ -105,9 +105,10 @@ func parseJournal(b []byte) (e Entry, id uint64, cursor string, ok bool) {
 	if err != nil || facility < 0 || facility > 23 {
 		facility = 3
 	}
-	// A user service is better named by its own unit than by user@UID.service.
-	who := journalField(f["_SYSTEMD_USER_UNIT"])
-	for _, k := range []string{"_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER", "_COMM"} {
+	// The program name, like syslog shows it. Units come last: PID 1 logs as init.scope, and
+	// template units have long instance names.
+	who := journalField(f["SYSLOG_IDENTIFIER"])
+	for _, k := range []string{"_COMM", "_SYSTEMD_USER_UNIT", "_SYSTEMD_UNIT"} {
 		if who == "" {
 			who = journalField(f[k])
 		}

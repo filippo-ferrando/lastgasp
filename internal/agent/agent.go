@@ -33,6 +33,8 @@ type Config struct {
 	ForwardSecrecy bool
 	ResolveEvery   time.Duration
 	MaxPstoreFile  int64
+	// PstoreArchive is where systemd-pstore moves pstore files. Those it moved in this boot are read too.
+	PstoreArchive string
 	// StashPath is a file on tmpfs that keeps unconfirmed records across agent restarts, empty to disable.
 	StashPath string
 	StashSize int
@@ -125,6 +127,16 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 		if err != nil && !os.IsNotExist(err) {
 			log.Printf("pstore: %v", err)
 		}
+		if cfg.PstoreArchive != "" {
+			// In a container, or when it won the race at boot, systemd-pstore moved the files already.
+			if since, err := BootTime(); err != nil {
+				log.Printf("pstore archive: %v", err)
+			} else if more, err := ReadPstoreArchive(cfg.PstoreArchive, since, cfg.MaxPstoreFile); err != nil && !os.IsNotExist(err) {
+				log.Printf("pstore archive: %v", err)
+			} else {
+				lines = append(lines, more...)
+			}
+		}
 		for _, l := range lines {
 			stats.PstoreRecords.Add(1)
 			// A part saved to pmsg keeps its number, so the server can match it with the kmsg copy.
@@ -165,6 +177,9 @@ func Run(ctx context.Context, cfg Config, log *Logger) error {
 	if stash != nil {
 		queue.Mirror(stash, tagMain)
 	}
+
+	// systemd waits for this before it starts systemd-pstore, which moves the pstore files away.
+	notifyReady(log)
 
 	c, cancel := context.WithTimeout(ctx, 5*time.Second)
 	if err := res.Refresh(c); err != nil {

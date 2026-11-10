@@ -5,22 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lastgasp login</title>
 <style>
-:root { --bg: #f7f7f5; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de; --accent: #c2410c; --bad: #b91c1c; }
+:root { --bg: #fafafa; --card: #fff; --raised: #f4f4f5; --text: #171717; --muted: #737373; --line: rgb(23 23 23 / .08);
+  --line2: rgb(23 23 23 / .14); --ember: #c2410c; --bad: #dc2626; color-scheme: light dark; }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #151514; --panel: #1e1e1c; --text: #e8e8e3; --muted: #9a9a93; --line: #33332f; --accent: #fb923c; --bad: #f87171; }
+  :root { --bg: #141415; --card: #19191b; --raised: #232325; --text: #ededed; --muted: #85858b; --line: rgb(237 237 237 / .08);
+    --line2: rgb(237 237 237 / .14); --ember: #fb923c; --bad: #e5484d; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text);
-  font: 14px/1.45 system-ui, sans-serif; padding: 16px; }
-form { width: min(340px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 22px; display: grid; gap: 12px; }
-h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .02em; }
-h1 span { color: var(--accent); }
-label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
-input, button { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
-input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-button { cursor: pointer; background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 600; }
+  font: 14px/20px system-ui, -apple-system, "Segoe UI", sans-serif; padding: 16px; }
+form { width: min(360px, 100%); background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 24px; display: grid; gap: 16px; }
+h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+h1 span { color: var(--ember); }
+label { display: grid; gap: 8px; color: var(--muted); font-size: 13px; }
+input, button { font: inherit; height: 36px; padding: 0 12px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); color: var(--text); }
+input:focus-visible, button:focus-visible { outline: 2px solid var(--ember); outline-offset: 1px; }
+button { cursor: pointer; background: var(--text); border-color: var(--text); color: var(--card); font-weight: 500; }
 button:disabled { opacity: .6; cursor: default; }
-#msg { color: var(--bad); min-height: 1.4em; margin: 0; }
+#msg { color: var(--bad); min-height: 20px; margin: 0; }
 </style>
 </head>
 <body>
@@ -28,7 +30,7 @@ button:disabled { opacity: .6; cursor: default; }
   <h1>last<span>gasp</span></h1>
   <label>User <input id="user" autocomplete="username" required autofocus></label>
   <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
-  <button id="go">log in</button>
+  <button id="go">Log in</button>
   <p id="msg" role="alert"></p>
 </form>
 <script>
@@ -50,11 +52,11 @@ $("login").onsubmit = async e => {
     const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({user: $("user").value, password: $("password").value})});
     if (r.ok) return location.replace(next);
-    $("msg").textContent = r.status === 429 ? "Too many failed logins, try again in " + (r.headers.get("Retry-After") || "a few") + " seconds." :
-      r.status === 401 ? "Wrong user name or password." : "Login failed: " + (await r.text()).trim();
+    $("msg").textContent = r.status === 429 ? "Too many failed logins, try again in " + (r.headers.get("Retry-After") || "a few") + " seconds" :
+      r.status === 401 ? "Wrong user name or password" : "Login failed: " + (await r.text()).trim();
     $("password").select();
   } catch {
-    $("msg").textContent = "The server is not reachable.";
+    $("msg").textContent = "The server is not reachable";
   } finally {
     $("go").disabled = false;
   }

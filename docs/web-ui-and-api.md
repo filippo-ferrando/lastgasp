@@ -4,20 +4,22 @@ The server serves a web UI at `/`, a JSON API under `/api/`, Prometheus metrics 
 
 ## Web UI
 
-The header shows the user, the server version and a "log out" button. The page refreshes every 2 seconds, and stops while its browser tab is hidden. A table is only redrawn when its data changes, and not while text in it is selected, so lines can be copied.
+The header shows the user, the server version and a "Log out" button. The page refreshes every 2 seconds, and stops while its browser tab is hidden. A table is only redrawn when its data changes, and not while text in it is selected, so lines can be copied. It follows the light or dark theme of the system.
+
+Incidents and Hosts sit side by side at the top, Logs take the full width below, and Silences and Agents share the last row. On narrow screens everything stacks.
 
 | Section | Shows |
 | --- | --- |
-| Incidents | the newest 50 incidents with severity, host, kind, count, alert state and summary. A click opens the incident with its kernel lines and pstore lines, the matching line marked. "open only" hides closed ones |
-| Silences | active and upcoming silences with their host pattern, kind, window, comment and author. Admins add a silence with the form above the table and end one with "end now" |
-| Agents | for admins: "add agents" makes a join token and shows the one line install command. Below, the usable tokens (revoke) and the enrolled hosts with the time and address they enrolled from (revoke key) |
-| Hosts | up or down, last packet, boots seen, packets received, missing, late, duplicates, agent drops, kernel overruns, send errors, records waiting in the agent, the agent version (marked when it differs from the server version, `old` for agents from before wire version 4), and the wire version of its packets (marked below 5, which has no forward secrecy). A click filters everything by that host, a second click removes the filter |
-| Missing packets | agent runs with missing packets and the missing sequence ranges |
-| Logs | live kernel lines, filtered by host, level, source and text. A click on the host of a line filters by that host. "live" off stops new lines. "older" loads 300 more and says when there are none. "download" saves all matching lines as NDJSON. When new lines arrive while the view is scrolled up, a button jumps to them |
+| Incidents | the newest 50 incidents with severity, host, kind, count, alert state and summary. A click opens the incident with its kernel lines and pstore lines, the matching line marked. "Open only" hides closed ones |
+| Hosts | up or down, boots seen, last packet, packets received, and the problems of the host: missing, agent drops, kernel overruns, send errors, late, duplicates and records waiting in the agent. Counters at 0 are left out, `none` means all are 0. Agent shows `current` when the agent has the server version, the version when it differs (`old` for agents from before wire version 4), and the packet version when it is below 5, which has no forward secrecy. A click filters everything by that host, a second click removes the filter |
+| Missing packets | only while packets are missing: agent runs with missing packets and the missing sequence ranges |
+| Logs | live kernel lines, filtered by host, level, source and text. A click on the host of a line filters by that host. "Live" off stops new lines. "Older" loads 300 more and says when there are none. "Download" saves all matching lines as NDJSON. When new lines arrive while the view is scrolled up, a button jumps to them |
+| Silences | active and upcoming silences with their host pattern, kind, window, comment and author. Admins add one with "New silence" and end one with "End now" |
+| Agents | for admins: "Add agents" opens the form that makes a join token and shows the one line install command. Below, the usable tokens (Revoke) and the enrolled hosts with the time and address they enrolled from (Revoke key) |
 
-The incident window shows the kernel lines up to the incident and the next 20 lines after it. It has buttons to copy its link and show the logs of its boot, scrolled to the incident line and marked. Admins also get a note field and buttons to acknowledge, resolve, and silence the host for 1, 4 or 24 hours. The note is saved with acknowledge or resolve and shown on the incident. It closes with Escape, the close button or a click outside.
+The incident window shows the kernel lines up to the incident and the next 20 lines after it, the line that explains the incident marked in orange. It has buttons to copy its link and show the logs of its boot, scrolled to the incident line and marked. Admins also get a note field and buttons to acknowledge, resolve, and silence the host for 1, 4 or 24 hours. The note is saved with acknowledge or resolve and shown on the incident. It closes with Escape, the close button or a click outside.
 
-Filters are part of the address (`/?host=db-01&level=3`, plus `boot=` after "show logs" of an incident, removed with its button), so a filtered view can be shared or bookmarked. An incident has its own link: `https://lastgasp.example.net/#incident=42`. Alerts use these links when `-public-url` is set.
+Filters are part of the address (`/?host=db-01&level=3`, plus `boot=` after "Show logs" of an incident, removed with its button), so a filtered view can be shared or bookmarked. An incident has its own link: `https://lastgasp.example.net/#incident=42`. Alerts use these links when `-public-url` is set.
 
 | Key | Does |
 | --- | --- |

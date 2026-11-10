@@ -5,185 +5,248 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lastgasp</title>
 <style>
+/* Graphite neutrals for long shifts. Ember orange is kept for the last line a machine sent, the logo and focus. */
 :root {
-  --bg: #f7f7f5; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
-  --accent: #c2410c; --ok: #15803d; --bad: #b91c1c; --warn: #a16207;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bg: #fafafa; --card: #fff; --raised: #f4f4f5; --text: #171717; --text2: #525252; --muted: #737373;
+  --line: rgb(23 23 23 / .08); --line2: rgb(23 23 23 / .14);
+  --ember: #c2410c; --bad: #dc2626; --warn: #a16207; --ok: #16a34a;
+  --term: #111113; --term-text: #d4d4d8; --term-muted: #85858b; --term-hit: #fdba74;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #151514; --panel: #1e1e1c; --text: #e8e8e3; --muted: #9a9a93; --line: #33332f;
-    --accent: #fb923c; --ok: #4ade80; --bad: #f87171; --warn: #facc15; }
+  :root { --bg: #141415; --card: #19191b; --raised: #232325; --text: #ededed; --text2: #a1a1a6; --muted: #85858b;
+    --line: rgb(237 237 237 / .08); --line2: rgb(237 237 237 / .14);
+    --ember: #fb923c; --bad: #e5484d; --warn: #e2a336; --ok: #4cc38a; --term: #0f0f10; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
-header { display: flex; align-items: baseline; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
-header h1 { margin: 0; font-size: 18px; letter-spacing: .02em; }
-header h1 span { color: var(--accent); }
+[hidden] { display: none !important; }
+* { scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/20px var(--sans); }
+header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px;
+  background: var(--bg); border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+header h1 span { color: var(--ember); }
 header .sub { color: var(--muted); font-size: 13px; }
-main { padding: 16px 20px; display: grid; gap: 16px; }
-section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-section h2 { margin: 0; padding: 10px 14px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--muted); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+#status.bad { color: var(--bad); }
+main { max-width: 1600px; margin: 0 auto; padding: 24px; display: grid; gap: 16px;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); align-items: start; }
+.wide { grid-column: 1 / -1; }
+.admin { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+section h2 { margin: 0; height: 48px; padding: 0 16px; display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 500; border-bottom: 1px solid var(--line); }
+.count { font: 12px/16px var(--mono); color: var(--muted); }
 .scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { font-weight: 600; font-size: 12px; color: var(--muted); }
-th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+th, td { height: 36px; padding: 0 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+th { height: 32px; font-weight: 400; font-size: 12px; color: var(--muted); }
+th.num, td.num, .num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num { font-family: var(--mono); font-size: 13px; }
 tr.click { cursor: pointer; }
-tr.click:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.up { background: var(--ok); } .down { background: var(--bad); }
-.bad { color: var(--bad); font-weight: 600; } .warn { color: var(--warn); font-weight: 600; }
+tr.click td { transition: background-color 150ms var(--ease); }
+tr.click:hover td { background: var(--raised); }
+tr.sel td { background: var(--raised); box-shadow: inset 0 1px 0 var(--line2), inset 0 -1px 0 var(--line2); }
 .muted { color: var(--muted); }
-.empty { padding: 14px; color: var(--muted); }
-.filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); align-items: center; }
-select, input, button, a.btn { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--text); text-decoration: none; }
-button, a.btn { cursor: pointer; }
-label.live { display: flex; gap: 6px; align-items: center; }
-#logs { font-family: var(--mono); font-size: 12.5px; max-height: 60vh; overflow: auto; }
-#logs td { white-space: pre-wrap; word-break: break-word; vertical-align: top; }
-#logs td.meta { white-space: nowrap; color: var(--muted); }
-.lv0, .lv1, .lv2, .lv3 { color: var(--bad); } .lv4 { color: var(--warn); } .lv7 { color: var(--muted); }
-.tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); }
-.tag.pstore { border-color: var(--accent); color: var(--accent); }
-.tag.netconsole { border-color: var(--warn); color: var(--warn); }
-.ranges { font-family: var(--mono); font-size: 12px; white-space: normal; }
-.sev { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-.sev-critical { color: var(--bad); } .sev-warning { color: var(--warn); } .sev-info { color: var(--muted); }
-td.summary { white-space: nowrap; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12px; }
-tr.closed td { opacity: .6; }
-dialog { width: min(1100px, 96vw); max-height: 90vh; padding: 0; border: 1px solid var(--line); border-radius: 8px;
-  background: var(--panel); color: var(--text); }
-dialog::backdrop { background: rgb(0 0 0 / .4); }
-dialog .head { display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border-bottom: 1px solid var(--line); }
-dialog .head h3 { margin: 0; font-size: 15px; flex: 1; }
-dialog .body { padding: 0 14px 14px; overflow: auto; max-height: calc(90vh - 60px); }
-dialog h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-dialog pre { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
-  font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 45vh; overflow: auto; }
-pre .ln { display: block; }
-pre .hit, tr.hit td { background: color-mix(in srgb, var(--bad) 22%, transparent); }
-button:hover:not(:disabled), a.btn:hover, select:hover, input:hover { border-color: var(--muted); }
-button:focus-visible, a.btn:focus-visible, select:focus-visible, input:focus-visible, tr.click:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: -2px; }
+.bad { color: var(--bad); } .warn { color: var(--warn); }
+.empty { padding: 16px; color: var(--muted); }
+/* Status: a dot and a word, no shouting. */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--muted); }
+.up { background: var(--ok); } .down { background: var(--bad); }
+.sev { white-space: nowrap; }
+.sev-critical .dot { background: var(--bad); } .sev-warning .dot { background: var(--warn); } .sev-info .dot { background: var(--muted); }
+.sev-critical { color: var(--text); }
+.tag { display: inline-block; margin-left: 4px; padding: 0 6px; font: 12px/20px var(--mono); color: var(--text2);
+  background: var(--raised); border-radius: 4px; }
+.tag.pstore { color: var(--ember); }
+.tag.netconsole { color: var(--warn); }
+/* The summary takes the room left over and is cut with an ellipsis. */
+td.summary { max-width: 0; width: 100%; min-width: 16ch; overflow: hidden; text-overflow: ellipsis; font: 12px var(--mono); color: var(--text2); }
+tr.closed td { color: var(--muted); }
+tr.closed td.summary, tr.closed .sev-critical { color: var(--muted); }
+.issues span + span::before { content: "\00b7"; margin: 0 6px; color: var(--muted); }
+/* Controls */
+select, input, button, a.btn { font: inherit; height: 32px; padding: 0 12px; border: 1px solid var(--line2); border-radius: 8px;
+  background: var(--card); color: var(--text); text-decoration: none; transition: border-color 150ms var(--ease), background-color 150ms var(--ease); }
+select { padding-right: 8px; }
+button, a.btn { cursor: pointer; display: inline-flex; align-items: center; background: var(--raised); border-color: var(--line); white-space: nowrap; }
+button:hover:not(:disabled), a.btn:hover { border-color: var(--line2); background: var(--card); }
+button:active:not(:disabled) { transform: scale(.98); }
+button.primary { background: var(--text); border-color: var(--text); color: var(--card); font-weight: 500; }
+button.primary:hover:not(:disabled) { background: var(--text); opacity: .9; }
+button.small { height: 28px; padding: 0 8px; font-size: 13px; }
+select:hover, input:hover { border-color: var(--muted); }
+:is(button, a.btn, select, input, tr.click):focus-visible { outline: 2px solid var(--ember); outline-offset: 1px; }
 button:disabled { opacity: .5; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 600; }
+input[type=checkbox] { height: 16px; width: 16px; padding: 0; accent-color: var(--text); }
+label.check { display: inline-flex; gap: 8px; align-items: center; color: var(--text2); font-size: 13px; cursor: pointer; }
 .grow { flex: 1; }
-#status.bad { color: var(--bad); }
-.chip { font-size: 12px; font-weight: 400; text-transform: none; letter-spacing: 0; }
-.hostlink { cursor: pointer; }
-.hostlink:hover { color: var(--accent); }
-.jump { position: sticky; bottom: 8px; display: flex; justify-content: center; pointer-events: none; }
-.jump button { pointer-events: auto; font-family: system-ui, sans-serif; box-shadow: 0 2px 8px rgb(0 0 0 / .2); }
-.msg { margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--bad); color: var(--bad); }
-dialog .head button { white-space: nowrap; }
-#logs td.meta { width: 1%; }
-dialog .head { flex-wrap: wrap; }
-.actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); align-items: center; }
-.actions input[type=text] { flex: 1; min-width: 12ch; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: center; }
+.bar input[type=text] { flex: 1; min-width: 12ch; }
+section h2 .grow + * { font-weight: 400; }
+kbd { display: inline-block; min-width: 20px; padding: 0 4px; font: 12px/18px var(--mono); text-align: center; color: var(--muted);
+  border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4px; }
+/* Logs read like a terminal: dense rows, no rules between them. */
+#logs { font: 12px/20px var(--mono); height: 70vh; min-height: 360px; overflow: auto; }
+#logs table td { height: auto; padding: 0 12px 0 0; border: 0; white-space: pre-wrap; word-break: break-word; vertical-align: top; }
+#logs table td:first-child { padding-left: 16px; }
+#logs tr:hover td { background: var(--raised); }
+#logs td.meta { width: 1%; white-space: nowrap; color: var(--muted); }
+#logs td.hostlink { cursor: pointer; }
+#logs td.hostlink:hover { color: var(--text); }
+#logs td.empty { padding: 16px; font-family: var(--sans); }
+.lv0, .lv1, .lv2, .lv3 { color: var(--bad); } .lv4 { color: var(--warn); } .lv7 { color: var(--muted); }
+#logs td.meta.lv0, #logs td.meta.lv1, #logs td.meta.lv2, #logs td.meta.lv3 { color: var(--bad); }
+#logs td.meta.lv4 { color: var(--warn); }
+/* The signature: the line a machine sent last before it died gets an ember rule. */
+tr.hit td { background: color-mix(in srgb, var(--ember) 12%, transparent); }
+tr.hit td:first-child { box-shadow: inset 2px 0 0 var(--ember); }
+.jump { position: sticky; bottom: 12px; display: flex; justify-content: center; pointer-events: none; }
+.jump button { pointer-events: auto; font-family: var(--sans); box-shadow: 0 8px 24px rgb(0 0 0 / .12); }
+.ranges { font: 12px var(--mono); white-space: normal; color: var(--text2); }
+.cmd { display: flex; gap: 8px; align-items: stretch; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.cmd pre { flex: 1; margin: 0; padding: 8px 12px; background: var(--raised); border-radius: 8px;
+  font: 12px/20px var(--mono); white-space: pre-wrap; word-break: break-all; }
+.note { padding: 0 16px 12px; color: var(--muted); font-size: 13px; }
+/* Incident window */
+dialog { width: min(1120px, 96vw); max-height: 90vh; padding: 0; border: 1px solid var(--line2); border-radius: 16px;
+  background: var(--card); color: var(--text); box-shadow: 0 8px 24px rgb(0 0 0 / .12); }
+dialog[open] { animation: rise 300ms var(--ease); }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+dialog::backdrop { background: rgb(0 0 0 / .4); }
+dialog .head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+dialog .head h3 { margin: 0; font-size: 16px; font-weight: 500; flex: 1; display: flex; align-items: center; gap: 12px; }
+dialog .head h3 .sev { font-size: 13px; font-weight: 400; color: var(--text2); }
+dialog .bar { padding: 12px 20px; }
+dialog .body { padding: 4px 20px 20px; overflow: auto; max-height: calc(90vh - 120px); }
+dialog h4 { margin: 20px 0 8px; font-size: 13px; font-weight: 500; color: var(--text2); display: flex; gap: 8px; }
+dialog h4 .count { line-height: 20px; }
+.summary-text { margin: 0; font: 14px/22px var(--mono); white-space: pre-wrap; word-break: break-word; }
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 24px; margin: 0; font-size: 13px; }
+dl.facts dt { color: var(--muted); } dl.facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+dl.facts dd.mono { font: 12px/20px var(--mono); }
+.notebox { margin: 0; padding: 8px 12px; background: var(--raised); border-radius: 8px; white-space: pre-wrap; }
+/* The kernel lines of an incident: a dark terminal, the same in both themes, the last words marked in ember. */
+pre.term { margin: 0; padding: 12px 0; background: var(--term); color: var(--term-text); border-radius: 12px;
+  font: 12px/20px var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 45vh; overflow: auto; }
+/* Wrapped lines hang under the message, so the time and level columns stay clear. */
+pre.term .ln { display: block; padding: 0 16px 0 calc(16px + 4ch); text-indent: -4ch; }
+pre.term .t, pre.term .l { color: var(--term-muted); }
+pre.term .lvb { color: #f87171; } pre.term .lvw { color: #e2a336; }
+pre.term .ln.hit { background: rgb(251 146 60 / .14); box-shadow: inset 2px 0 0 #fb923c; color: var(--term-hit); }
+.msg { margin: 12px 0 0; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--bad); color: var(--bad); }
 .ok-msg { color: var(--ok); }
-.cmd { display: flex; gap: 8px; align-items: stretch; padding: 10px 14px; border-bottom: 1px solid var(--line); }
-.cmd pre { flex: 1; margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
-  font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-all; }
-.note { padding: 0 14px 10px; color: var(--muted); font-size: 13px; }
+@media (max-width: 1100px) {
+  main, .admin { grid-template-columns: minmax(0, 1fr); }
+}
 @media (max-width: 640px) {
-  header, main { padding-left: 10px; padding-right: 10px; }
-  #logs td { padding: 4px 6px; }
+  header { padding: 0 16px; } main { padding: 16px; }
+  header .sub#who { display: none; }
+  /* Phones keep the time and the message, which still has its level color. */
+  #logs tr td:nth-child(1), #logs tr td:nth-child(3) { display: none; }
+  #logs table td:nth-child(2) { padding-left: 16px; }
   dialog .head h3 { flex-basis: 100%; }
 }
+@media (prefers-reduced-motion: reduce) { dialog[open] { animation: none; } * { transition: none !important; } }
 </style>
 </head>
 <body>
 <header>
   <h1>last<span>gasp</span></h1>
-  <div class="sub" id="status">loading</div>
+  <div class="sub" id="status">Loading</div>
   <div class="sub" id="who" style="margin-left:auto"></div>
-  <button id="logout" hidden title="End this login">log out</button>
+  <button id="logout" class="small" hidden title="End this login">Log out</button>
 </header>
 <main>
-  <section>
-    <h2><span>Incidents <span class="chip" id="inc-count"></span></span>
-      <label class="live chip"><input type="checkbox" id="inc-open"> open only</label></h2>
+  <section id="incidents-section">
+    <h2>Incidents <span class="count" id="inc-count"></span><span class="grow"></span>
+      <label class="check"><input type="checkbox" id="inc-open"> Open only</label></h2>
     <div class="scroll" id="incidents"></div>
   </section>
 
-  <section>
-    <h2>Silences <span class="chip" id="sil-count"></span></h2>
-    <div class="actions" id="sil-form" hidden>
-      <input id="sil-host" type="text" list="sil-hosts" placeholder="host or pattern, like db-* or *" aria-label="host or pattern">
-      <datalist id="sil-hosts"></datalist>
-      <select id="sil-kind" aria-label="incident kind"><option value="">every kind</option></select>
-      <select id="sil-dur" aria-label="duration"><option>30m</option><option selected>1h</option><option>4h</option><option>24h</option><option>168h</option></select>
-      <input id="sil-comment" type="text" placeholder="comment, like kernel update" aria-label="comment">
-      <button id="sil-add" class="primary">add silence</button>
-    </div>
-    <div class="scroll" id="silences"></div>
-  </section>
-
-  <section id="agents-section" hidden>
-    <h2>Agents <span class="chip" id="agent-count"></span></h2>
-    <div class="actions">
-      <input id="tok-comment" type="text" placeholder="comment, like rack 4" aria-label="token comment">
-      <select id="tok-uses" aria-label="uses"><option value="1" selected>1 agent</option><option value="10">10 agents</option><option value="0">any number of agents</option></select>
-      <select id="tok-ttl" aria-label="valid for"><option value="1h">for 1 hour</option><option value="24h" selected>for 24 hours</option><option value="168h">for 7 days</option><option value="8760h">for 1 year</option></select>
-      <button id="tok-add" class="primary" title="A join token lets new agents get their own key">add agents</button>
-    </div>
-    <div id="tok-new" hidden>
-      <div class="cmd"><pre id="tok-cmd"></pre><button id="tok-copy">copy</button></div>
-      <div class="note" id="tok-note"></div>
-    </div>
-    <div class="scroll" id="tokens"></div>
-    <div class="scroll" id="agents"></div>
-  </section>
-
-  <section>
-    <h2>Hosts <span class="chip" id="hostcount"></span></h2>
+  <section id="hosts-section">
+    <h2>Hosts <span class="count" id="hostcount"></span></h2>
     <div class="scroll" id="hosts"></div>
   </section>
 
-  <section>
-    <h2>Missing packets <span class="chip" id="gapnote"></span></h2>
+  <section id="gaps-section" class="wide" hidden>
+    <h2>Missing packets <span class="count" id="gapnote"></span></h2>
     <div class="scroll" id="gaps"></div>
   </section>
 
-  <section id="logs-section">
-    <h2>Logs <span class="chip" id="logcount"></span></h2>
-    <div class="filters">
-      <select id="f-host" aria-label="host"><option value="">all hosts</option></select>
+  <section id="logs-section" class="wide">
+    <h2>Logs <span class="count" id="logcount"></span></h2>
+    <div class="bar">
+      <select id="f-host" aria-label="host"><option value="">All hosts</option></select>
       <select id="f-level" aria-label="level">
-        <option value="">all levels</option>
-        <option value="0">emerg</option><option value="1">alert and above</option>
-        <option value="2">crit and above</option><option value="3">err and above</option>
-        <option value="4">warning and above</option><option value="5">notice and above</option>
-        <option value="6">info and above</option>
+        <option value="">All levels</option>
+        <option value="0">Emerg</option><option value="1">Alert and above</option>
+        <option value="2">Crit and above</option><option value="3">Err and above</option>
+        <option value="4">Warning and above</option><option value="5">Notice and above</option>
+        <option value="6">Info and above</option>
       </select>
-      <select id="f-source" aria-label="source"><option value="">all sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option><option value="netconsole">netconsole</option><option value="journal">journal</option></select>
-      <input id="f-q" type="search" placeholder="search text" aria-label="search text" title="Press / to search, Escape to clear">
+      <select id="f-source" aria-label="source"><option value="">All sources</option><option value="kmsg">kmsg</option><option value="pstore">pstore</option><option value="netconsole">netconsole</option><option value="journal">journal</option></select>
+      <input id="f-q" type="search" placeholder="Search" aria-label="search text" title="Press / to search, Escape to clear">
+      <kbd title="Press / to search">/</kbd>
       <input id="f-boot" type="hidden">
-      <button id="f-boot-chip" hidden title="Show every boot"></button>
-      <button id="f-clear" hidden>clear filters</button>
+      <button id="f-boot-chip" class="small" hidden title="Show every boot"></button>
+      <button id="f-clear" class="small" hidden>Clear filters</button>
       <span class="grow"></span>
-      <label class="live" title="Add new lines as they arrive"><input type="checkbox" id="f-live" checked> live</label>
-      <button id="more" title="Load 300 older lines">older</button>
-      <a class="btn" id="download" href="/api/download" title="Save all matching lines as NDJSON">download</a>
+      <label class="check" title="Add new lines as they arrive"><input type="checkbox" id="f-live" checked> Live</label>
+      <button id="more" title="Load 300 older lines">Older</button>
+      <a class="btn" id="download" href="/api/download" title="Save all matching lines as NDJSON">Download</a>
     </div>
     <div id="logs"><table><tbody id="logrows"></tbody></table>
       <div class="jump"><button id="jump" hidden></button></div></div>
   </section>
+
+  <div class="admin wide">
+    <section id="silences-section">
+      <h2>Silences <span class="count" id="sil-count"></span><span class="grow"></span>
+        <button id="sil-toggle" class="small" hidden aria-expanded="false" aria-controls="sil-form">New silence</button></h2>
+      <div class="bar" id="sil-form" hidden>
+        <input id="sil-host" type="text" list="sil-hosts" placeholder="Host or pattern, like db-*" aria-label="host or pattern">
+        <datalist id="sil-hosts"></datalist>
+        <select id="sil-kind" aria-label="incident kind"><option value="">Every kind</option></select>
+        <select id="sil-dur" aria-label="duration"><option>30m</option><option selected>1h</option><option>4h</option><option>24h</option><option>168h</option></select>
+        <input id="sil-comment" type="text" placeholder="Comment, like kernel update" aria-label="comment">
+        <button id="sil-add" class="primary">Add silence</button>
+      </div>
+      <div class="scroll" id="silences"></div>
+    </section>
+
+    <section id="agents-section" hidden>
+      <h2>Agents <span class="count" id="agent-count"></span><span class="grow"></span>
+        <button id="tok-toggle" class="small" aria-expanded="false" aria-controls="tok-form">Add agents</button></h2>
+      <div class="bar" id="tok-form" hidden>
+        <input id="tok-comment" type="text" placeholder="Comment, like rack 4" aria-label="token comment">
+        <select id="tok-uses" aria-label="uses"><option value="1" selected>1 agent</option><option value="10">10 agents</option><option value="0">Any number of agents</option></select>
+        <select id="tok-ttl" aria-label="valid for"><option value="1h">For 1 hour</option><option value="24h" selected>For 24 hours</option><option value="168h">For 7 days</option><option value="8760h">For 1 year</option></select>
+        <button id="tok-add" class="primary" title="A join token lets new agents get their own key">Make join token</button>
+      </div>
+      <div id="tok-new" hidden>
+        <div class="cmd"><pre id="tok-cmd"></pre><button id="tok-copy">Copy</button></div>
+        <div class="note" id="tok-note"></div>
+      </div>
+      <div class="scroll" id="tokens"></div>
+      <div class="scroll" id="agents"></div>
+    </section>
+  </div>
 </main>
 <dialog id="inc-dialog" aria-labelledby="inc-title">
   <div class="head"><h3 id="inc-title"></h3>
-    <button id="inc-copy" title="Copy a link to this incident">copy link</button>
-    <button id="inc-logs" title="Show the logs of this boot at the incident">show logs</button>
-    <button id="inc-ack" class="primary">acknowledge</button>
-    <button id="inc-close" title="Close (Escape)">close</button></div>
-  <div class="actions" id="inc-actions" hidden>
-    <input id="inc-note" type="text" maxlength="1000" placeholder="note, saved with acknowledge or resolve" aria-label="note">
-    <button id="inc-resolve" title="Close the incident as resolved and tell the targets that got an alert">resolve</button>
+    <button id="inc-copy" title="Copy a link to this incident">Copy link</button>
+    <button id="inc-logs" title="Show the logs of this boot at the incident">Show logs</button>
+    <button id="inc-ack" class="primary">Acknowledge</button>
+    <button id="inc-close" title="Close (Escape)">Close</button></div>
+  <div class="bar" id="inc-actions" hidden>
+    <input id="inc-note" type="text" maxlength="1000" placeholder="Note, saved with acknowledge or resolve" aria-label="note">
+    <button id="inc-resolve" title="Close the incident as resolved and tell the targets that got an alert">Resolve</button>
     <select id="inc-sil-dur" aria-label="silence duration"><option>1h</option><option>4h</option><option>24h</option></select>
-    <button id="inc-silence" title="Hold back new alerts of this host">silence host</button>
+    <button id="inc-silence" title="Hold back new alerts of this host">Silence host</button>
   </div>
   <div class="body"><div class="msg" id="inc-msg" hidden></div><div id="inc-body"></div></div>
 </dialog>
@@ -202,6 +265,9 @@ const ago = t => {
   return Math.round(s / 86400) + "d ago";
 };
 const tsFmt = us => (us / 1e6).toFixed(6).padStart(13, " ");
+const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
+// Severity as a dot and a word.
+const sevHTML = s => `<span class="sev sev-${esc(s)}"><span class="dot"></span>${esc(cap(s))}</span>`;
 // Age cells are filled by tickAges, so a table only changes when its data changes.
 const age = t => `<td class="muted" data-t="${esc(t)}" title="${esc(new Date(t).toLocaleString())}"></td>`;
 
@@ -237,7 +303,7 @@ async function copyText(text, button) {
 async function copyButton(button, text, label) {
   const ok = await copyText(text, button);
   if (!ok) window.prompt("Copy with Ctrl+C:", text);
-  button.textContent = ok ? "copied" : label;
+  button.textContent = ok ? "Copied" : label;
   setTimeout(() => { button.textContent = label; }, 1500);
 }
 
@@ -282,7 +348,7 @@ function saveFilters() {
   history.replaceState(null, "", location.pathname + (q ? "?" + q : "") + location.hash);
   $("f-clear").hidden = !filterQuery().toString();
   $("f-boot-chip").hidden = !$("f-boot").value;
-  $("f-boot-chip").textContent = "boot " + $("f-boot").value.slice(0, 8) + " \u00d7";
+  $("f-boot-chip").textContent = "Boot " + $("f-boot").value.slice(0, 8) + " \u00d7";
   $("download").href = "/api/download?" + filterQuery();
 }
 
@@ -320,33 +386,35 @@ async function loadHosts() {
   render($("sil-hosts"), hosts.map(h => `<option value="${esc(h.host)}">`).join(""));
   $("hostcount").textContent = hosts.length ? hosts.filter(h => h.up).length + " of " + hosts.length + " up" : "";
   for (const h of hosts) setHostOption(h.host);
-  if (!hosts.length) return render($("hosts"), '<div class="empty">No agent has sent anything yet.</div>');
-  const cls = (v, c) => v > 0 ? ` class="num ${c}"` : ' class="num"';
+  if (!hosts.length) return render($("hosts"), '<div class="empty">No agent has sent anything yet</div>');
   const cur = $("f-host").value;
-  render($("hosts"), `<table><tr><th>Host</th><th>Last seen</th><th>Boots</th><th class="num">Received</th>
-    <th class="num" title="Packets that never arrived">Missing</th><th class="num" title="Packets that arrived out of order or were sent again">Late</th>
-    <th class="num">Duplicates</th><th class="num" title="Dropped by the agent because its buffer was full">Agent drops</th>
-    <th class="num" title="Kernel overwrote records before the agent read them">Kernel overruns</th>
-    <th class="num">Send errors</th><th class="num" title="Records the agent holds until a server confirms them">Buffered</th>
-    <th title="Version of the newest agent run">Agent</th>
-    <th class="num" title="Packet version of the newest agent run. Version 5 has forward secrecy">Wire</th></tr>` +
+  // Counters at 0 are left out, so the ones that need a look stand out.
+  const issues = h => {
+    const list = [[h.missing, "missing", "bad", "Packets that never arrived"],
+      [h.agent.BufferDrops, "agent drops", "bad", "Dropped by the agent because its buffer was full"],
+      [h.agent.KmsgOverruns, "kernel overruns", "warn", "Kernel overwrote records before the agent read them"],
+      [h.agent.SendErrors, "send errors", "warn", "Sends that failed on the agent"],
+      [h.recovered, "late", "muted", "Packets that arrived out of order or were sent again"],
+      [h.duplicates, "duplicates", "muted", "Packets received twice"],
+      [h.agent.Buffered, "buffered", "muted", "Records the agent holds until a server confirms them"]]
+      .filter(([v]) => v > 0).map(([v, what, c, title]) => `<span class="${c}" title="${title}">${fmtNum(v)} ${what}</span>`);
+    return list.length ? list.join("") : '<span class="muted">none</span>';
+  };
+  const oldAgent = h => h.agent_version && h.agent_version !== serverVersion;
+  const oldWire = h => h.wire_version && h.wire_version < 5;
+  render($("hosts"), `<table><tr><th>Host</th><th>Last seen</th><th class="num">Received</th>
+    <th>Issues</th><th title="Version of the newest agent run, and its packet version">Agent</th></tr>` +
     hosts.map(h => `<tr class="click${cur === h.host ? " sel" : ""}" tabindex="0" data-key="${esc(h.host)}"
       title="${cur === h.host ? "Show all hosts" : "Show only " + esc(h.host)}" aria-pressed="${cur === h.host}">
-      <td><span class="dot ${h.up ? "up" : "down"}" title="${h.up ? "up" : "down"}"></span>${esc(h.host)}</td>
+      <td><span class="dot ${h.up ? "up" : "down"}" title="${h.up ? "up" : "down"}"></span>${esc(h.host)}
+        <span class="count" title="Boots seen">${h.boots} ${h.boots === 1 ? "boot" : "boots"}</span></td>
       ${age(h.last_seen)}
-      <td class="num">${h.boots}</td>
       <td class="num">${fmtNum(h.received)}</td>
-      <td${cls(h.missing, "bad")}>${fmtNum(h.missing)}</td>
-      <td class="num">${fmtNum(h.recovered)}</td>
-      <td class="num">${fmtNum(h.duplicates)}</td>
-      <td${cls(h.agent.BufferDrops, "bad")}>${fmtNum(h.agent.BufferDrops)}</td>
-      <td${cls(h.agent.KmsgOverruns, "warn")}>${fmtNum(h.agent.KmsgOverruns)}</td>
-      <td${cls(h.agent.SendErrors, "warn")}>${fmtNum(h.agent.SendErrors)}</td>
-      <td class="num">${fmtNum(h.agent.Buffered)}</td>
-      <td class="muted${h.agent_version && h.agent_version !== serverVersion ? " warn" : ""}"
-        title="${h.agent_version && h.agent_version !== serverVersion ? "Not the server version " + esc(serverVersion) : ""}">${esc(h.agent_version || "old")}</td>
-      <td class="num${h.wire_version && h.wire_version < 5 ? " warn" : ""}"
-        title="${h.wire_version && h.wire_version < 5 ? "No forward secrecy: an old agent, or -wait-ack=false or -forward-secrecy=false" : ""}">${h.wire_version || "?"}</td></tr>`).join("") + "</table>");
+      <td class="issues">${issues(h)}</td>
+      <td class="muted" title="Packet version ${h.wire_version || "unknown"}"><span class="${oldAgent(h) ? "warn" : ""}"
+        title="${oldAgent(h) ? "Not the server version " + esc(serverVersion) : "Same version as the server, " + esc(h.agent_version)}">${
+        !h.agent_version ? "old" : oldAgent(h) ? esc(h.agent_version) : "current"}</span>${oldWire(h) ?
+        ` <span class="warn" title="No forward secrecy: an old agent, or -wait-ack=false or -forward-secrecy=false">packet v${h.wire_version}</span>` : ""}</td></tr>`).join("") + "</table>");
 }
 
 // Missing packets
@@ -355,7 +423,8 @@ async function loadGaps() {
   const host = $("f-host").value;
   const streams = await getJSON("/api/streams" + (host ? "?host=" + encodeURIComponent(host) : ""));
   $("gapnote").textContent = host ? "of " + host : "";
-  if (!streams.length) return render($("gaps"), '<div class="empty">No missing packets.</div>');
+  $("gaps-section").hidden = !streams.length;
+  if (!streams.length) return render($("gaps"), "");
   const show = rs => {
     const parts = rs.slice(-20).map(r => r.from === r.to ? r.from : r.from + "-" + r.to);
     return (rs.length > 20 ? "... " : "") + parts.join(", ");
@@ -396,9 +465,9 @@ function updateLogUI() {
   $("logcount").textContent = fmtNum(n) + " shown" + ($("f-live").checked ? "" : ", paused");
   const more = $("more");
   more.disabled = logs.loadingOlder || logs.noOlder || !logs.oldest;
-  more.textContent = logs.loadingOlder ? "loading..." : logs.noOlder && n ? "no older lines" : "older";
+  more.textContent = logs.loadingOlder ? "Loading" : logs.noOlder && n ? "No older lines" : "Older";
   $("jump").hidden = !logs.unseen;
-  $("jump").textContent = "jump to newest (" + fmtNum(logs.unseen) + " new)";
+  $("jump").textContent = "Jump to newest, " + fmtNum(logs.unseen) + " new";
 }
 
 async function reloadLogs() {
@@ -425,7 +494,7 @@ async function reloadLogs() {
   }
   if (gen !== logs.gen) return;
   $("logrows").innerHTML = recs.length ? recs.slice().reverse().map(logRow).join("")
-    : `<tr><td class="empty">${filterQuery().toString() ? "No lines match these filters." : "No lines yet."}</td></tr>`;
+    : `<tr><td class="empty">${filterQuery().toString() ? "No lines match these filters" : "No lines yet"}</td></tr>`;
   if (!recs.length) $("logrows").dataset.empty = "1"; else delete $("logrows").dataset.empty;
   logs.newest = recs.length ? recs[0].id : 0;
   logs.oldest = recs.length ? recs[recs.length - 1].id : 0;
@@ -491,7 +560,7 @@ async function loadIncidents() {
   const open = list.filter(i => !i.closed_at).length;
   $("inc-count").textContent = list.length ? open + " open" + ($("f-host").value ? " on " + $("f-host").value : "") : "";
   if (!list.length) {
-    return render($("incidents"), `<div class="empty">${$("inc-open").checked ? "No open incidents." : "No incidents."}</div>`);
+    return render($("incidents"), `<div class="empty">${$("inc-open").checked ? "No open incidents" : "No incidents"}</div>`);
   }
   // Incidents of several hosts at once share a group. The tag names the hosts of the group in this list.
   const groups = {};
@@ -505,7 +574,7 @@ async function loadIncidents() {
   render($("incidents"), `<table><tr><th>Severity</th><th>Opened</th><th>Host</th><th>Kind</th>
     <th class="num">Count</th><th>State</th><th>Summary</th></tr>` +
     list.map(i => `<tr class="click${i.closed_at ? " closed" : ""}" tabindex="0" data-key="${i.id}" title="Open incident ${i.id}">
-      <td class="sev sev-${esc(i.severity)}">${esc(i.severity)}</td>
+      <td>${sevHTML(i.severity)}</td>
       ${age(i.opened_at)}
       <td>${esc(i.host)}</td><td>${esc(KINDS[i.kind] || i.kind)}${i.rule ? ` <span class="tag">${esc(i.rule)}</span>` : ""}${groupTag(i)}</td>
       <td class="num">${fmtNum(i.count)}</td>
@@ -523,12 +592,12 @@ async function loadSilences() {
   const now = Date.now();
   const active = list.filter(s => new Date(s.starts_at) <= now).length;
   $("sil-count").textContent = list.length ? active + " active" + (list.length > active ? ", " + (list.length - active) + " upcoming" : "") : "";
-  if (!list.length) return render($("silences"), '<div class="empty">No silences. A silence holds back alerts, for example during maintenance.</div>');
+  if (!list.length) return render($("silences"), '<div class="empty">No silences. A silence holds back alerts, for example during maintenance</div>');
   render($("silences"), `<table><tr><th>Host</th><th>Kind</th><th>From</th><th>Until</th><th>Comment</th><th>By</th><th></th></tr>` +
-    list.map(s => `<tr><td>${esc(s.host)}</td><td>${esc(s.kind ? KINDS[s.kind] || s.kind : "every kind")}</td>
+    list.map(s => `<tr><td>${esc(s.host)}</td><td>${esc(s.kind ? KINDS[s.kind] || s.kind : "Every kind")}</td>
       <td class="muted">${esc(new Date(s.starts_at).toLocaleString())}</td><td class="muted">${esc(new Date(s.ends_at).toLocaleString())}</td>
       <td>${esc(s.comment)}</td><td class="muted">${esc(s.created_by)}</td>
-      <td>${isAdmin ? `<button data-end="${s.id}" data-key="end-${s.id}">end now</button>` : ""}</td></tr>`).join("") + "</table>");
+      <td>${isAdmin ? `<button class="small" data-end="${s.id}" data-key="end-${s.id}">End now</button>` : ""}</td></tr>`).join("") + "</table>");
 }
 
 async function addSilence(host, kind, duration, comment) {
@@ -584,12 +653,12 @@ async function loadAgents() {
       <td class="muted">#${t.id}${t.revoked ? " (revoked)" : ""}</td><td>${esc(t.comment)}</td><td class="num">${t.used}</td>
       <td>${t.uses_left < 0 ? "no limit" : t.uses_left}</td><td class="muted">${esc(new Date(t.expires_at).toLocaleString())}</td>
       <td class="muted">${esc(t.created_by)}</td>
-      <td>${usable(t) ? `<button data-revoke-token="${t.id}" data-key="tok-${t.id}">revoke</button>` : ""}</td></tr>`).join("") + "</table>" : "");
+      <td>${usable(t) ? `<button class="small" data-revoke-token="${t.id}" data-key="tok-${t.id}">Revoke</button>` : ""}</td></tr>`).join("") + "</table>" : "");
   render($("agents"), agents.length ? `<table><tr><th>Enrolled host</th><th>Enrolled</th><th>From</th><th class="num">Token</th><th></th></tr>` +
     agents.map(a => `<tr><td>${esc(a.host)}</td>${age(a.enrolled_at)}<td class="muted">${esc(a.from)}</td>
       <td class="num muted">#${a.token_id}</td>
-      <td><button data-revoke-agent="${esc(a.host)}" data-key="agent-${esc(a.host)}" title="Refuse packets with this key">revoke key</button></td></tr>`).join("") + "</table>"
-    : '<div class="empty">No agent enrolled yet. "add agents" makes a join token and the command that installs an agent with it.</div>');
+      <td><button class="small" data-revoke-agent="${esc(a.host)}" data-key="agent-${esc(a.host)}" title="Refuse packets with this key">Revoke key</button></td></tr>`).join("") + "</table>"
+    : '<div class="empty">No agent enrolled yet. "Add agents" makes a join token and the command that installs an agent with it</div>');
 }
 
 $("tok-add").onclick = async () => {
@@ -609,7 +678,16 @@ $("tok-add").onclick = async () => {
     b.disabled = false;
   }
 };
-$("tok-copy").onclick = () => copyButton($("tok-copy"), $("tok-cmd").textContent, "copy");
+$("tok-copy").onclick = () => copyButton($("tok-copy"), $("tok-cmd").textContent, "Copy");
+// The forms open on demand, so lists and logs keep the room.
+for (const [btn, form] of [["sil-toggle", "sil-form"], ["tok-toggle", "tok-form"]]) {
+  $(btn).onclick = () => {
+    const open = $(form).hidden;
+    $(form).hidden = !open;
+    $(btn).setAttribute("aria-expanded", open);
+    if (open) $(form).querySelector("input").focus();
+  };
+}
 $("agents-section").onclick = async e => {
   const tb = e.target.closest("button[data-revoke-token]"), ab = e.target.closest("button[data-revoke-agent]");
   if (!tb && !ab) return;
@@ -630,7 +708,8 @@ async function loadMe() {
   const me = await getJSON("/api/me");
   isAdmin = me.role === "admin";
   serverVersion = me.version;
-  $("sil-form").hidden = !isAdmin;
+  $("sil-toggle").hidden = !isAdmin;
+  if (!isAdmin) $("sil-form").hidden = true;
   $("agents-section").hidden = !isAdmin;
   $("who").textContent = (me.auth ? me.user + " (" + me.role + "), " : "") + "server " + me.version;
   $("logout").hidden = !me.session;
@@ -653,7 +732,7 @@ function setAckButton(i) {
   const b = $("inc-ack");
   b.hidden = !isAdmin || !i;
   b.disabled = !i || !!i.acked_at;
-  b.textContent = i && i.acked_at ? "acknowledged" : "acknowledge";
+  b.textContent = i && i.acked_at ? "Acknowledged" : "Acknowledge";
   b.title = i && i.acked_at ? "Seen " + new Date(i.acked_at).toLocaleString() : "Mark as seen";
 }
 
@@ -661,7 +740,7 @@ async function showIncident(id) {
   if (!$("inc-dialog").open || !shown || shown.id !== +id) {
     shown = null;
     $("inc-title").textContent = "Incident " + id;
-    $("inc-body").innerHTML = '<div class="empty">loading</div>';
+    $("inc-body").innerHTML = '<div class="empty">Loading</div>';
     for (const b of ["inc-copy", "inc-logs"]) $(b).disabled = true;
     $("inc-note").value = "";
     setAckButton(null);
@@ -680,19 +759,26 @@ async function showIncident(id) {
   shown = i;
   for (const b of ["inc-copy", "inc-logs"]) $(b).disabled = false;
   setAckButton(i);
-  $("inc-title").innerHTML = `<span class="sev sev-${esc(i.severity)}">${esc(i.severity)}</span>
-    ${esc(i.host)}: ${esc(KINDS[i.kind] || i.kind)}${i.rule ? " (" + esc(i.rule) + ")" : ""}`;
-  const line = r => `<span class="ln${r.message === i.summary || r.id === i.last_record_id && (i.kind === "kernel_error" || i.kind === "journal_error") ? " hit" : ""}">` +
-    `[${tsFmt(r.ts_usec)}] ${esc(LEVELS[r.level] || "")} ${esc(r.message)}</span>`;
-  const block = rs => rs.map(line).join("");
-  $("inc-body").innerHTML = `<h4>Summary</h4><pre>${esc(i.summary)}</pre>
-    <h4>Details</h4><div class="muted">boot ${esc(i.boot_id)}, opened ${esc(new Date(i.opened_at).toLocaleString())}${i.closed_at ?
-      ", closed " + esc(new Date(i.closed_at).toLocaleString()) : ", still open"}, count ${fmtNum(i.count)}<br>${state(i)}</div>` +
-    (i.note ? `<h4>Note</h4><pre>${esc(i.note)}</pre>` : "") +
-    (v.pstore.length ? `<h4>Saved by the kernel before the reboot (pstore, ${fmtNum(v.pstore.length)} lines)</h4><pre>${block(v.pstore)}</pre>` : "") +
-    `<h4>Last kernel lines received (${fmtNum(v.records.length)})</h4>` +
-    (v.records.length ? `<pre id="inc-tail">${block(v.records)}</pre>` : '<div class="empty">No lines received for this boot.</div>') +
-    (v.after.length ? `<h4>Next lines received (${fmtNum(v.after.length)})</h4><pre>${block(v.after)}</pre>` : "");
+  $("inc-title").innerHTML = `${esc(i.host)}: ${esc(KINDS[i.kind] || i.kind)}${i.rule ? " (" + esc(i.rule) + ")" : ""} ${sevHTML(i.severity)}`;
+  // The line that explains the incident is marked, like the last words of a machine that died.
+  const hit = r => r.message === i.summary || r.id === i.last_record_id && (i.kind === "kernel_error" || i.kind === "journal_error");
+  const lvClass = l => l <= 3 ? " lvb" : l === 4 ? " lvw" : "";
+  const line = r => `<span class="ln${hit(r) ? " hit" : ""}"><span class="t">[${tsFmt(r.ts_usec)}]</span> ` +
+    `<span class="l${lvClass(r.level)}">${esc((LEVELS[r.level] || "").padEnd(7))}</span> ${esc(r.message)}</span>`;
+  const term = (rs, id) => `<pre class="term"${id ? ` id="${id}"` : ""}>${rs.map(line).join("")}</pre>`;
+  const when = t => esc(new Date(t).toLocaleString());
+  $("inc-body").innerHTML = `<h4>Summary</h4><p class="summary-text">${esc(i.summary)}</p>
+    <h4>Details</h4><dl class="facts">
+      <dt>Boot</dt><dd class="mono">${esc(i.boot_id)}</dd>
+      <dt>Opened</dt><dd>${when(i.opened_at)}</dd>
+      <dt>Closed</dt><dd>${i.closed_at ? when(i.closed_at) : "still open"}</dd>
+      <dt>Count</dt><dd>${fmtNum(i.count)}</dd>
+      <dt>State</dt><dd>${state(i)}</dd></dl>` +
+    (i.note ? `<h4>Note</h4><p class="notebox">${esc(i.note)}</p>` : "") +
+    (v.pstore.length ? `<h4>Saved by the kernel before the reboot <span class="count">pstore, ${fmtNum(v.pstore.length)} lines</span></h4>${term(v.pstore)}` : "") +
+    `<h4>Last ${i.kind === "journal_error" ? "" : "kernel "}lines received <span class="count">${fmtNum(v.records.length)}</span></h4>` +
+    (v.records.length ? term(v.records, "inc-tail") : '<div class="empty">No lines received for this boot</div>') +
+    (v.after.length ? `<h4>Next lines received <span class="count">${fmtNum(v.after.length)}</span></h4>${term(v.after)}` : "");
   const tail = $("inc-tail");
   if (tail) tail.scrollTop = tail.scrollHeight;
 }
@@ -725,7 +811,7 @@ $("inc-ack").onclick = async () => {
   if (!shown) return;
   const b = $("inc-ack"), id = shown.id;
   b.disabled = true;
-  b.textContent = "saving...";
+  b.textContent = "Saving";
   incidentMsg("");
   try {
     const i = await postJSON("/api/incidents/" + id + "/ack", {note: $("inc-note").value.trim()});
@@ -757,14 +843,14 @@ $("inc-silence").onclick = async () => {
   incidentMsg("");
   try {
     await addSilence(shown.host, "", dur, $("inc-note").value.trim() || "from incident " + shown.id);
-    b.textContent = "silenced for " + dur;
-    setTimeout(() => { b.textContent = "silence host"; b.disabled = false; }, 2000);
+    b.textContent = "Silenced for " + dur;
+    setTimeout(() => { b.textContent = "Silence host"; b.disabled = false; }, 2000);
   } catch (e) {
     b.disabled = false;
     incidentMsg("Not silenced: " + e.message);
   }
 };
-$("inc-copy").onclick = () => copyButton($("inc-copy"), location.href, "copy link");
+$("inc-copy").onclick = () => copyButton($("inc-copy"), location.href, "Copy link");
 $("inc-logs").onclick = () => {
   if (!shown) return;
   const {host, boot_id, last_record_id} = shown;
@@ -804,8 +890,8 @@ onActivate($("logrows"), t => {
 
 function setStatus(e) {
   $("status").classList.toggle("bad", !!e);
-  $("status").textContent = e ? (e.status ? "server error: " + e.message : "server not reachable, retrying") :
-    "updated " + new Date().toLocaleTimeString();
+  $("status").textContent = e ? (e.status ? "Server error: " + e.message : "Server not reachable, retrying") :
+    "Updated " + new Date().toLocaleTimeString();
 }
 
 let timer, running = false, again = false;

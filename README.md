@@ -48,7 +48,7 @@ docker run -d --name lastgasp -p 5140:5140/udp -p 127.0.0.1:8080:8080 -v lastgas
   -listen :5140 -http :8080 -db /var/lib/lastgasp/lastgasp.db -agent-address 10.0.0.5:5140
 ```
 
-Open `http://127.0.0.1:8080`, click "add agents" in the Agents section, and run the command it gives you on the machine you want to watch (Linux, root):
+Open `http://127.0.0.1:8080`, click "Add agents" in the Agents section, and run the command it gives you on the machine you want to watch (Linux, root):
 
 ```sh
 curl -fsSL https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/install-agent.sh | sudo sh -s -- --server 10.0.0.5:5140 --token lgj_...

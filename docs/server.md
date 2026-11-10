@@ -8,7 +8,7 @@ Every agent encrypts its packets with a key the server knows. There are two ways
 
 ### Enrollment
 
-An admin makes a join token in the UI (Agents, "add agents") or with the API, and runs the install command it shows on the new machine. The agent proves it knows the token and sends an X25519 public key to the server UDP port, the server answers with its own public key, and both derive the agent key. Neither the key nor the token travels, so this is safe on a network without HTTPS. Enrolled keys are kept in the database. Details in [how-it-works.md](how-it-works.md#enrollment).
+An admin makes a join token in the UI (Agents, "Add agents") or with the API, and runs the install command it shows on the new machine. The agent proves it knows the token and sends an X25519 public key to the server UDP port, the server answers with its own public key, and both derive the agent key. Neither the key nor the token travels, so this is safe on a network without HTTPS. Enrolled keys are kept in the database. Details in [how-it-works.md](how-it-works.md#enrollment).
 
 | Token setting | Choices in the UI | API field |
 | --- | --- | --- |

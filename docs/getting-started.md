@@ -43,7 +43,7 @@ The log line `lastgasp-server started` shows the version and the UDP and HTTP ad
 
 ## 2. Install the agent
 
-In the UI, the Agents section has an "add agents" button. It makes a join token and shows the command that installs an agent with it:
+In the UI, the Agents section has an "Add agents" button. It makes a join token and shows the command that installs an agent with it:
 
 ```sh
 curl -fsSL https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/install-agent.sh | sudo sh -s -- --server 10.0.0.5:5140 --token lgj_3f9a...

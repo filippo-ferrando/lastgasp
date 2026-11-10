@@ -127,7 +127,7 @@ A silence holds back alerts of matching incidents, for example during maintenanc
 
 An incident is silenced when it was opened during the window, or when its alert would be sent during the window. So a reboot at the end of a maintenance window stays quiet, even though its alert waits for the crash check. Ending a silence early stops it for new incidents.
 
-Silences are created and ended in the UI (the Silences section, or "silence host" on an incident) or through the API. Silences that ended more than `-retain` ago are deleted.
+Silences are created and ended in the UI (the Silences section, or "Silence host" on an incident) or through the API. Silences that ended more than `-retain` ago are deleted.
 
 ## Alerts
 

@@ -4,7 +4,7 @@
 
 ## Install in one line
 
-Make a join token in the web UI (Agents, "add agents") and run the command it shows, as root, on each new machine:
+Make a join token in the web UI (Agents, "Add agents") and run the command it shows, as root, on each new machine:
 
 ```sh
 curl -fsSL https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/install-agent.sh | sudo sh -s -- --server 10.0.0.5:5140 --token lgj_3f9a...

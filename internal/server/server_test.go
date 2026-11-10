@@ -304,9 +304,10 @@ func TestJournalLines(t *testing.T) {
 		return &wire.Packet{Host: "node-1", BootID: [16]byte{0xa}, Instance: inst, Seq: seq, Kind: wire.KindJournal,
 			Record: wire.Record{Priority: 3<<3 | 4, TsUsec: 5, FileID: id, Part: 1, Parts: 1, Msg: msg}}
 	}
-	e.send(t, journal(1, 1, 0xabc, "systemd-coredump: Process 812 (nginx) of user 33 dumped core."))
+	core := "systemd-coredump: Process 812 (nginx) of user 33 dumped core.\n\nStack trace of thread 812:\n#0  0x00007f n/a"
+	e.send(t, journal(1, 1, 0xabc, core))
 	// After an agent restart the journal is read from the start of the boot again: the line is stored once.
-	e.send(t, journal(2, 1, 0xabc, "systemd-coredump: Process 812 (nginx) of user 33 dumped core."))
+	e.send(t, journal(2, 1, 0xabc, core))
 	e.send(t, journal(2, 2, 0xabd, "app: fine"))
 	recs := e.waitRecords(t, 2)
 	if recs[0].Source != "journal" || recs[0].Level != 4 || recs[0].Facility != 3 {
@@ -315,6 +316,10 @@ func TestJournalLines(t *testing.T) {
 	l, _ := e.st.Incidents(context.Background(), store.IncidentFilter{Kind: incident.KindJournalError})
 	if len(l) != 1 || l[0].Rule != "coredump" {
 		t.Fatalf("incidents %+v", l)
+	}
+	// A message of many lines is kept whole, the incident summary is its first line.
+	if want := "systemd-coredump: Process 812 (nginx) of user 33 dumped core. (3 more lines)"; l[0].Summary != want {
+		t.Fatalf("summary %q, want %q", l[0].Summary, want)
 	}
 	var v IncidentView
 	json.Unmarshal([]byte(e.get(t, "/api/incidents/"+strconv.FormatInt(l[0].ID, 10))), &v)

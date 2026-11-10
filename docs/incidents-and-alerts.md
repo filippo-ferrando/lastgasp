@@ -84,7 +84,7 @@ A rule has a name, a severity, an optional count and a regular expression ([Go s
 | `coredump` | warning, journal | `Process N (name) of user N dumped core` or `terminated abnormally` |
 | `unit_failed` | warning, journal | `: Failed with result '`, a systemd unit that failed |
 
-Rules marked journal match userspace lines from journald, which start with the unit or program name. The others match kernel lines. In a rules file, `@journal` after the severity makes a journal rule.
+Rules marked journal match userspace lines from journald, which start with the unit or program name. The others match kernel lines. In a rules file, `@journal` after the severity makes a journal rule. A journal rule matches the text as journald has it, with real newlines and backslashes, not `\xNN`. `.` does not match a newline, so `(?s)` is needed to match across the lines of a message like a core dump. The incident summary is the first line of the message.
 
 A rules file (`-rules`) adds, replaces or removes rules, one per line:
 

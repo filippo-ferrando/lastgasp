@@ -102,9 +102,10 @@ An ack also says what arrived: every packet up to a sequence number, except a li
 
 1. The agent keeps every sent record in its buffer until an ack covers it. Then the record is done.
 2. A record that an ack lists as missing is sent again with its first sequence number, so the server counts it as late. It is sent again only if its last send came before the heartbeat that the ack answers, so a record still on its way is not sent twice.
-3. Each heartbeat carries the oldest sequence number the agent still holds. The server forgets missing ranges below it: they stay counted as missing, but no ack asks for them again. Lost heartbeats and records pushed out of a full buffer end up there.
-4. When a record cannot be stored (the database is down for longer than the retries), the server marks its packet as missing again, so the agent sends it again.
-5. With several servers, the first ack that covers a record is enough.
+3. Each heartbeat carries the oldest sequence number the agent still holds. The server forgets missing ranges below it: they stay counted as missing, but no ack asks for them again. Records pushed out of a full buffer, and lost heartbeats older than the last 64, end up there.
+4. The agent keeps the sequence numbers of its last 64 unconfirmed heartbeats. A heartbeat that an ack lists as missing, for example one sent while the server restarted, is sent again with its first sequence number and fresh counters, so it counts as late and not as missing.
+5. When a record cannot be stored (the database is down for longer than the retries), the server marks its packet as missing again, so the agent sends it again.
+6. With several servers, the first ack that covers a record is enough.
 
 So records sent in the 15 seconds before the agent notices a dead server are not lost: when a server answers again, it lists them as missing and the agent sends them again, as long as they are still in the buffer. `-wait-ack=false` turns acks off, for networks where replies cannot reach the agent. Records are then done once sent.
 
@@ -131,7 +132,7 @@ For each agent run the server keeps the highest sequence number and the missing 
 | Agent drops | records the agent dropped because its buffer was full, or long messages cut at 255 parts. These never got a sequence number, so the agent reports them in its heartbeat |
 | Kernel overruns | times the kernel overwrote records before the agent read them |
 
-Gap state is saved to the database every 5 seconds and on stop, so a server restart keeps it. Packets sent while the server was down show up as missing.
+Gap state is saved to the database every 5 seconds and on stop, so a server restart keeps it. Packets sent while the server was down show up as missing, then as late once the agent sends them again. Only records no longer in the agent buffer stay missing.
 
 ## Deduplication
 

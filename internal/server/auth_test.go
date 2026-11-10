@@ -406,6 +406,18 @@ func TestTokenTTLChoicesAreAccepted(t *testing.T) {
 	}
 }
 
+// A refresh that redraws a table must not scroll the page back to the row that had the focus.
+func TestRenderKeepsFocusWithoutScrolling(t *testing.T) {
+	b, _ := uiFS.ReadFile("ui/index.html")
+	fn := regexp.MustCompile(`(?s)function render\(el, html\) \{.*?\n\}`).Find(b)
+	if fn == nil {
+		t.Fatal("render not found")
+	}
+	if strings.Contains(string(fn), ".focus()") || !strings.Contains(string(fn), "preventScroll: true") {
+		t.Fatal("render moves the focus with scrolling")
+	}
+}
+
 func TestLoginPageNextStaysOnThisServer(t *testing.T) {
 	b, _ := uiFS.ReadFile("ui/login.html")
 	if !strings.Contains(string(b), "new URL(") || !strings.Contains(string(b), "u.origin === location.origin") {

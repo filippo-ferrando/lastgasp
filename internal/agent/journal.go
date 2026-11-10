@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // JournalReader follows journald through journalctl and passes userspace lines to Push.
@@ -119,7 +122,26 @@ func parseJournal(b []byte) (e Entry, id uint64, cursor string, ok bool) {
 	ts, _ := strconv.ParseUint(journalField(f["__MONOTONIC_TIMESTAMP"]), 10, 64)
 	h := fnv.New64a()
 	h.Write([]byte(cursor))
-	return Entry{Priority: uint16(facility<<3 | prio), TsUsec: ts, Msg: escapeKmsg(msg)}, h.Sum64(), cursor, true
+	return Entry{Priority: uint16(facility<<3 | prio), TsUsec: ts, Msg: escapeJournal(msg)}, h.Sum64(), cursor, true
+}
+
+// escapeJournal writes control characters other than tab and newline, and bytes that are not UTF-8, as \xNN.
+// Backslashes and other text stay, so a unit name like mnt-a\x2db.mount can be copied as it is.
+func escapeJournal(s string) string {
+	s = strings.TrimRight(s, "\n")
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if (r < ' ' && r != '\t' && r != '\n') || (r >= 0x7f && r < 0xa0) || (r == utf8.RuneError && n == 1) {
+			for _, c := range []byte(s[i : i+n]) {
+				fmt.Fprintf(&b, "\\x%02x", c)
+			}
+		} else {
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
 }
 
 // journalField reads a field written as a string, or as an array of bytes when it is not valid UTF-8.

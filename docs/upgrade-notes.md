@@ -4,6 +4,9 @@ Changes that need an action on upgrade, newest first. The release workflow puts 
 
 ## Unreleased
 
+- Fixed: every server restart left about 2 packets per host counted as missing for good: the heartbeats sent while the server was down. The agent now sends lost heartbeats again, so they count as late. Upgrade the agents to get this; servers need no change.
+- Fixed: journal lines were escaped like kernel lines, so newlines, backslashes and non-ASCII text appeared as `\xNN` (`mnt-a\x5cx2db.mount`, `dumped core.\x0a\x0aStack trace`). They now keep their text, and a journal incident has the first line of a multi-line message as its summary. Lines stored before the upgrade keep the old form. Custom `@journal` rules that match `\x0a` or `\x5c` need the plain characters.
+- Fixed: the web UI scrolled back to a clicked host or incident row on every refresh.
 - Web UI: incidents and hosts side by side, logs below them in dense terminal rows, silences and agents in the last row with their forms behind a button. The Hosts table lists only the counters above 0. The kernel lines of an incident show in a dark block, the line that explains it marked.
 - Fixed: `systemd-pstore.service` moved pstore files away before the agent read them, so crash logs were lost on systemd distributions, and always in Kubernetes. The agent unit is now `Type=notify` and runs before `systemd-pstore`, and the agent also reads the files moved in this boot from `/var/lib/systemd/pstore` (`-pstore-archive`; the Helm chart mounts it). Install the new unit together with the new agent: an older agent never reports ready to a `Type=notify` unit. `install-agent.sh` installs both.
 - Fixed: pstore lines from kernels with `CONFIG_PRINTK_CALLER` kept the caller ID (`[ T2048]`), so they were not matched with their kmsg copy.

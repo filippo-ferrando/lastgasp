@@ -320,7 +320,7 @@ async function getJSON(url, opts) {
 }
 
 // render replaces the content of el only when it changed, and not while text in it is selected.
-// The focused row keeps the focus.
+// The focused row keeps the focus, without scrolling the page to it.
 function render(el, html) {
   if (el.lastHTML === html) return;
   const sel = getSelection();
@@ -329,7 +329,7 @@ function render(el, html) {
   const key = f && el.contains(f) ? f.dataset.key : null;
   el.innerHTML = html;
   el.lastHTML = html;
-  if (key) el.querySelector(`[data-key="${CSS.escape(key)}"]`)?.focus();
+  if (key) el.querySelector(`[data-key="${CSS.escape(key)}"]`)?.focus({preventScroll: true});
 }
 
 // Filters live in the address, so a view can be shared and survives a reload.

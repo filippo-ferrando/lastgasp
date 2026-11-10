@@ -55,6 +55,8 @@ type Sender struct {
 	beatMu sync.Mutex
 	beats  [16]beatSent // the newest heartbeats, an ack must answer one of them
 	nbeat  int
+	// sentBeats holds heartbeats not confirmed yet, to send again the ones a server missed.
+	sentBeats beatSeqs
 
 	clock  func() time.Time // for tests, nil is time.Now
 	peerMu sync.Mutex
@@ -191,6 +193,7 @@ func (s *Sender) readAcks(c packetConn) {
 			for _, q := range s.queues() {
 				q.Ack(ack.Upto, ack.Missing, tx)
 			}
+			s.sentBeats.ack(ack.Upto, ack.Missing, tx)
 		}
 		s.notifyAck()
 	}
@@ -229,7 +232,9 @@ func (s *Sender) Run(ctx context.Context) {
 				AgentVersion: s.Version}
 			switch {
 			case ready:
-				s.send(beat)
+				if s.send(beat) == nil && s.WaitAck {
+					s.sentBeats.add(beat.Seq, s.tx)
+				}
 				nextBeat = time.Now().Add(s.Heartbeat)
 			case !s.fs():
 				// A probe has seq 0, so probes nobody received do not count as missing packets.
@@ -249,6 +254,14 @@ func (s *Sender) Run(ctx context.Context) {
 				d = min(initWait, wire.HandshakeRetry)
 			}
 			s.wait(ctx, d, false)
+			continue
+		}
+		if seq, ok := s.sentBeats.next(); ok {
+			if s.resendBeat(seq) == nil {
+				s.pace.wait(ctx)
+			} else {
+				retry.Sleep(ctx)
+			}
 			continue
 		}
 		q, it, ok := s.next()
@@ -359,9 +372,24 @@ func (s *Sender) sendItem(q *Queue, it Item) error {
 	return err
 }
 
+// resendBeat sends a heartbeat again with the seq of one a server missed, with fresh counters.
+func (s *Sender) resendBeat(seq uint64) error {
+	beat := &wire.Packet{Kind: wire.KindHeartbeat, Seq: seq, Stats: s.Stats.snapshot(s.buffered(), time.Since(s.start)),
+		Oldest: s.oldest(), AgentVersion: s.Version}
+	if err := s.write(beat); err != nil {
+		return err
+	}
+	s.sentBeats.resent(seq, s.tx)
+	s.noteBeat(beat.SentAt, s.tx)
+	return nil
+}
+
 // oldest returns the lowest seq the agent can still send again. Packets below it are never sent again.
 func (s *Sender) oldest() uint64 {
 	o := s.seq + 1
+	if v := s.sentBeats.oldest(); v != 0 && v < o {
+		o = v
+	}
 	for _, q := range s.queues() {
 		if v := q.Oldest(); v != 0 && v < o {
 			o = v

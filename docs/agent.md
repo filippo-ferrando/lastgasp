@@ -177,6 +177,7 @@ With `-journal`, the agent also sends lines from journald: failed units, core du
 - On start, the agent sends the journal of the whole boot from `-journal-priority` up, so lines from before it started are not missed. After an agent restart it sends them again, and the server drops the ones it has.
 - Kernel lines in the journal are skipped, as kmsg sends them already.
 - Each line starts with the program name, like `sshd: ...` or `systemd: nginx.service: ...`, and has the source `journal` on the server.
+- The text is kept as journald has it: UTF-8, tabs, newlines and backslashes stay, so a unit name like `mnt-data\x2dssd.mount` can be copied. Other control characters and bytes that are not UTF-8 appear as `\xNN`. An incident from a line of many lines, like a core dump, has the first line as its summary.
 - Journal lines are not kept in the stash or in pmsg: journald keeps them itself.
 - `journalctl` is looked up at start. Without it, `-journal` stops the agent with an error.
 - Servers before v0.1.6 refuse journal packets as malformed. Upgrade the server first.

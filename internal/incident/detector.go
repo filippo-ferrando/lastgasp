@@ -345,7 +345,7 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 			continue
 		}
 		inc := &store.Incident{Host: r.Host, BootID: r.BootID, Kind: kind, Severity: rule.Severity,
-			Rule: rule.Name, FirstRecordID: r.ID, LastRecordID: r.ID, Count: 1, Summary: r.Message, OpenedAt: now, UpdatedAt: now}
+			Rule: rule.Name, FirstRecordID: r.ID, LastRecordID: r.ID, Count: 1, Summary: summaryOf(r.Message), OpenedAt: now, UpdatedAt: now}
 		if rule.Count > 1 {
 			h := d.hits[key]
 			if h == nil {
@@ -357,7 +357,7 @@ func (d *Detector) Records(ctx context.Context, recs []*store.Record, inserted [
 			}
 			delete(d.hits, key)
 			inc.FirstRecordID, inc.Count = h.ids[0], len(h.ids)
-			inc.Summary = fmt.Sprintf("%d times in %s: %s", len(h.ids), shortDuration(rule.Window), r.Message)
+			inc.Summary = fmt.Sprintf("%d times in %s: %s", len(h.ids), shortDuration(rule.Window), summaryOf(r.Message))
 		}
 		d.create(ctx, inc)
 		created = true
@@ -772,6 +772,15 @@ func (d *Detector) updateOpen() {
 	for _, k := range kinds {
 		d.Metrics.Open.WithLabelValues(k).Set(float64(n[k]))
 	}
+}
+
+// summaryOf is the first line of a message, as journal lines like a core dump can have many.
+func summaryOf(msg string) string {
+	first, rest, ok := strings.Cut(msg, "\n")
+	if !ok {
+		return msg
+	}
+	return fmt.Sprintf("%s (%d more lines)", first, strings.Count(rest, "\n")+1)
 }
 
 func lastLine(r store.Record) string {

@@ -628,6 +628,81 @@ func TestSenderResendsMissingRecords(t *testing.T) {
 	}
 }
 
+// A heartbeat lost while the server restarts is sent again with its seq, so it does not stay missing.
+func TestSenderResendsMissingHeartbeat(t *testing.T) {
+	conn := &flakyConn{acks: make(chan []byte, 1)}
+	s := &Sender{Host: "h", Instance: 7, Key: testKey, Queue: NewQueue(10), Stats: &Stats{}, Log: NewLogger(io.Discard, 10),
+		Resolver: staticAddrs{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}, Heartbeat: 30 * time.Millisecond, WaitAck: true}
+	s.newConn = func() (packetConn, error) { return conn, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	waitFor := func(skip int, ok func(*wire.Packet) bool) (*wire.Packet, int) {
+		for ctx.Err() == nil {
+			ps := conn.packets(t)
+			for i := skip; i < len(ps); i++ {
+				if ok(ps[i]) {
+					return ps[i], i + 1
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("timeout")
+		return nil, 0
+	}
+	isBeat := func(p *wire.Packet) bool { return p.Kind == wire.KindHeartbeat && p.Seq != 0 }
+	probe, _ := waitFor(0, func(p *wire.Packet) bool { return p.Kind == wire.KindHeartbeat })
+	ack, _ := wire.EncodeAck(probe, 0, nil, testKey)
+	conn.acks <- ack
+	lost, n := waitFor(0, isBeat)
+	beat, n := waitFor(n, isBeat)
+	// Until the lost heartbeat is confirmed, the server must keep waiting for it.
+	if beat.Oldest != lost.Seq {
+		t.Fatalf("heartbeat oldest %d, want %d", beat.Oldest, lost.Seq)
+	}
+	ack, _ = wire.EncodeAck(beat, beat.Seq, []wire.Range{{From: lost.Seq, To: lost.Seq}}, testKey)
+	conn.acks <- ack
+	again, _ := waitFor(n, func(p *wire.Packet) bool { return p.Kind == wire.KindHeartbeat && p.Seq == lost.Seq })
+	ack, _ = wire.EncodeAck(again, beat.Seq, nil, testKey)
+	conn.acks <- ack
+	for ctx.Err() == nil && s.sentBeats.oldest() != 0 && s.sentBeats.oldest() <= beat.Seq {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if o := s.sentBeats.oldest(); o != 0 && o <= beat.Seq {
+		t.Fatalf("confirmed heartbeat %d still kept", o)
+	}
+}
+
+func TestBeatSeqsAck(t *testing.T) {
+	var b beatSeqs
+	for seq := uint64(1); seq <= 4; seq++ {
+		b.add(seq, seq)
+	}
+	// Seq 2 is missing and was sent before the heartbeat the ack answers, seq 4 is not covered yet.
+	b.ack(3, []wire.Range{{From: 2, To: 2}}, 3)
+	if seq, ok := b.next(); !ok || seq != 2 {
+		t.Fatalf("next %d %v, want 2", seq, ok)
+	}
+	if b.oldest() != 2 {
+		t.Fatalf("oldest %d, want 2", b.oldest())
+	}
+	b.resent(2, 5)
+	if _, ok := b.next(); ok {
+		t.Fatal("heartbeat sent again twice")
+	}
+	b.ack(4, nil, 6)
+	if b.oldest() != 0 {
+		t.Fatalf("oldest %d after full ack, want 0", b.oldest())
+	}
+	for seq := uint64(10); seq < 10+maxBeatSeqs+5; seq++ {
+		b.add(seq, seq)
+	}
+	if b.oldest() != 15 {
+		t.Fatalf("oldest %d, want 15 after the oldest were dropped", b.oldest())
+	}
+}
+
 func TestSenderSendsEarlyHeartbeatWhenBufferWaits(t *testing.T) {
 	conn := &flakyConn{acks: make(chan []byte, 1)}
 	q := NewQueue(4)

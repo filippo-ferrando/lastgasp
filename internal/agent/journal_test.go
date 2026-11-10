@@ -15,7 +15,7 @@ import (
 func TestParseJournal(t *testing.T) {
 	e, id, cursor, ok := parseJournal([]byte(`{"__CURSOR":"s=1;i=2","PRIORITY":"3","SYSLOG_FACILITY":"4",` +
 		`"_SYSTEMD_UNIT":"sshd.service","MESSAGE":"bad\tlogin","__MONOTONIC_TIMESTAMP":"1234"}`))
-	if !ok || cursor != "s=1;i=2" || id == 0 || e.Priority != 4<<3|3 || e.TsUsec != 1234 || e.Msg != `sshd.service: bad\x09login` {
+	if !ok || cursor != "s=1;i=2" || id == 0 || e.Priority != 4<<3|3 || e.TsUsec != 1234 || e.Msg != "sshd.service: bad\tlogin" {
 		t.Fatalf("got %+v %x %q %v", e, id, cursor, ok)
 	}
 	// The program name comes first: PID 1 logs as init.scope.
@@ -39,6 +39,22 @@ func TestParseJournal(t *testing.T) {
 	}
 	if _, _, _, ok := parseJournal([]byte(`not json`)); ok {
 		t.Fatal("garbage taken")
+	}
+}
+
+// Journal text stays readable: tabs, newlines, backslashes and UTF-8 are kept, other control bytes are escaped.
+func TestEscapeJournal(t *testing.T) {
+	for in, want := range map[string]string{
+		`systemd: mnt-casper\x2ddata.mount: Failed`: `systemd: mnt-casper\x2ddata.mount: Failed`,
+		"core dumped.\n\n#0 n/a\n":                  "core dumped.\n\n#0 n/a",
+		"caf\u00e9 \tok":                            "caf\u00e9 \tok",
+		"color \x1b[31mred\x7f":                     `color \x1b[31mred\x7f`,
+		"c1 \u009b x":                               `c1 \xc2\x9b x`,
+		"bad \xff":                                  `bad \xff`,
+	} {
+		if got := escapeJournal(in); got != want {
+			t.Errorf("escapeJournal(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

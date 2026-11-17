@@ -1,5 +1,16 @@
 # Operations
 
+Running lastgasp in production: what to set up first, how to monitor and back up the server, and what to check when something looks wrong.
+
+- [Production checklist](#production-checklist)
+- [Monitoring](#monitoring)
+- [Backups](#backups)
+- [Upgrades](#upgrades)
+- [Key rotation](#key-rotation)
+- [Troubleshooting](#troubleshooting)
+- [Security notes](#security-notes)
+- [Known limits](#known-limits)
+
 ## Production checklist
 
 | Item | How |
@@ -96,7 +107,7 @@ Also back up the key file, the auth file and the rules file. Enrolled agent keys
 
 ## Upgrades
 
-Read [upgrade-notes.md](upgrade-notes.md) first: it lists what each release needs on upgrade.
+Read the [changelog](../CHANGELOG.md) first: the `Upgrade` heading of each release lists what it needs on upgrade.
 
 | Part | Order and effect |
 | --- | --- |

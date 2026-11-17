@@ -49,25 +49,26 @@ jobs:
       - name: Build release files
         run: make dist VERSION=${{ github.ref_name }}
 
-      # The changes since the previous tag become the release notes.
+      # The CHANGELOG.md section of the tag becomes the release notes, followed by install lines.
       - name: Write release notes
         env:
           TAG: ${{ github.ref_name }}
           SERVER_URL: "https://git.fferrando.cc"
           REPOSITORY: ${{ github.repository }}
         run: |
-          prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
           image=$(echo "$REGISTRY/$REPOSITORY-server" | tr '[:upper:]' '[:lower:]')
-          # Upgrade notes of this tag, or the unreleased ones, with doc links pointing at the tag.
-          upgrade=$(sh deploy/upgrade-notes.sh "$TAG" docs/upgrade-notes.md "$SERVER_URL/$REPOSITORY/src/tag/$TAG/docs")
+          # Doc links in the changelog point at the files of this tag.
+          changes=$(sh deploy/changelog.sh "$TAG" CHANGELOG.md "$SERVER_URL/$REPOSITORY/src/tag/$TAG")
+          if [ -z "$changes" ]; then
+            echo "CHANGELOG.md has no section for $TAG and no Unreleased section" >&2
+            exit 1
+          fi
           {
-            if [ -n "$upgrade" ]; then
-              echo "## Upgrade notes"
-              echo
-              echo "$upgrade"
-              echo
-            fi
-            echo "Install an agent: create a join token in the web UI (Agents, \"add agents\") and run the command it shows, or:"
+            echo "$changes"
+            echo
+            echo "## Install"
+            echo
+            echo "Install an agent: create a join token in the web UI (Agents, \"Add agents\") and run the command it shows, or:"
             echo
             echo '```sh'
             echo "curl -fsSL $SERVER_URL/$REPOSITORY/releases/download/$TAG/install-agent.sh | sudo sh -s -- --server SERVER:5140 --token TOKEN"
@@ -77,9 +78,7 @@ jobs:
             echo
             echo "Helm chart: \`helm install lastgasp oci://$REGISTRY/${REPOSITORY%%/*}/lastgasp --version ${TAG#v}\`"
             echo
-            echo "Changes${prev:+ since $prev}:"
-            echo
-            git log --pretty='- %s' ${prev:+"$prev.."}"$TAG"
+            echo "Full changelog: [CHANGELOG.md]($SERVER_URL/$REPOSITORY/src/tag/$TAG/CHANGELOG.md)"
           } > notes.md
 
       - uses: actions/upload-artifact@v3

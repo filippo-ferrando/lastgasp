@@ -2,6 +2,19 @@
 
 `lastgasp-agent` runs on every machine whose kernel logs should be kept. It needs root, or the capabilities `CAP_SYSLOG` (read `/dev/kmsg`) and `CAP_IPC_LOCK` (lock memory).
 
+- [Install in one line](#install-in-one-line)
+- [Install with the script](#install-with-the-script)
+- [Enroll by hand](#enroll-by-hand)
+- [Run by hand](#run-by-hand)
+- [Flags](#flags)
+- [The stash](#the-stash)
+- [Userspace logs](#userspace-logs)
+- [pstore and systemd-pstore](#pstore-and-systemd-pstore)
+- [The systemd unit](#the-systemd-unit)
+- [Sizing](#sizing)
+- [Where the agent logs](#where-the-agent-logs)
+- [Troubleshooting](#troubleshooting)
+
 ## Install in one line
 
 Make a join token in the web UI (Agents, "Add agents") and run the command it shows, as root, on each new machine:

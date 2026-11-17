@@ -1,21 +1,49 @@
+<p align="center">
+  <img src="assets/header.jpg" alt="lastgasp" width="560">
+</p>
+
 # lastgasp documentation
 
-lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last lines before a crash, a hang or a dead disk are saved somewhere else. A small agent runs on every machine, a server stores the logs, finds missing packets, turns crashes and kernel errors into incidents and sends alerts.
+lastgasp ships kernel logs off a Linux machine over encrypted UDP, so the last lines before a
+crash, a hang or a dead disk are saved somewhere else. A small agent runs on every machine, a
+server stores the logs, finds missing packets, turns crashes and kernel errors into incidents and
+sends alerts. These pages go into more detail than the [project README](../README.md).
 
-| Page | Content |
-| --- | --- |
-| [Getting started](getting-started.md) | first server, first agent in one line, check that logs arrive |
-| [How it works](how-it-works.md) | agent and server design, packets, acks, missing packets, deduplication |
-| [Forward secrecy](forward-secrecy.md) | why and how version 5 packets use a Noise handshake, options looked at, upgrade |
-| [Agent](agent.md) | one line install, enrollment, install script, flags, systemd unit, stash, sizing, troubleshooting |
-| [Server](server.md) | keys and enrollment, binary, systemd, Docker, health checks, database, retention, reload, reverse proxy |
-| [Kubernetes](kubernetes.md) | Helm chart: agent DaemonSet, server, keys, Prometheus |
-| [Incidents and alerts](incidents-and-alerts.md) | incident kinds, rules, webhooks, email, testing incidents |
-| [Web UI and API](web-ui-and-api.md) | login and sessions, roles, JSON API with examples, Prometheus metrics |
-| [Operations](operations.md) | production checklist, monitoring, backups, upgrades, troubleshooting, limits |
-| [Upgrade notes](upgrade-notes.md) | actions needed when upgrading to a release |
-| [Releasing](releasing.md) | CI, release files, server image, secrets |
-| [Open work](open-work.md) | ideas not done yet |
+## Getting started
+
+- **[Getting started](getting-started.md)**: first server, first agent in one line, check that
+  logs arrive.
+
+## Guides
+
+- **[Agent](agent.md)**: one line install, enrollment, install script, flags, systemd unit,
+  stash, sizing, troubleshooting.
+- **[Server](server.md)**: keys and enrollment, binary, systemd, Docker, health checks, database,
+  retention, netconsole, reload, reverse proxy.
+- **[Kubernetes](kubernetes.md)**: Helm chart with the agent DaemonSet, server, keys and
+  Prometheus.
+- **[Incidents and alerts](incidents-and-alerts.md)**: incident kinds, rules, webhooks, email,
+  testing incidents.
+- **[Web UI and API](web-ui-and-api.md)**: login and sessions, roles, JSON API with examples,
+  Prometheus metrics.
+- **[Operations](operations.md)**: production checklist, monitoring, backups, upgrades,
+  troubleshooting, limits.
+
+## Reference
+
+- **[How it works](how-it-works.md)**: agent and server design, packets, acks, missing packets,
+  deduplication.
+- **[Forward secrecy](forward-secrecy.md)**: why and how version 5 packets use a Noise handshake,
+  options looked at, upgrade.
+- **[Open work](open-work.md)**: known gaps and ideas not done yet.
+
+## Project
+
+- [Contributing](../CONTRIBUTING.md)
+- [Changelog](../CHANGELOG.md): changes and upgrade actions of each release
+- [Releasing](releasing.md): CI, release files, server image, secrets
+- [Examples](../examples/README.md): ready to use Docker Compose setups
+- [License (GPL-3.0)](../LICENSE.txt)
 
 ## Words used in these pages
 

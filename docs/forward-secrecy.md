@@ -2,6 +2,15 @@
 
 Design of packet version 5: agent and server agree on fresh keys with the [Noise Protocol Framework](https://noiseprotocol.org/noise.html), so a key stolen later cannot open traffic recorded earlier.
 
+- [Why](#why)
+- [Goals](#goals)
+- [Options looked at](#options-looked-at)
+- [Protocol](#protocol)
+- [Effect on the rest of the design](#effect-on-the-rest-of-the-design)
+- [Compatibility and upgrade](#compatibility-and-upgrade)
+- [What forward secrecy covers](#what-forward-secrecy-covers)
+- [Tests](#tests)
+
 ## Why
 
 Up to version 4 the key of an agent run is derived from the shared key with HKDF over the boot ID and the instance ID. The boot ID and the instance ID travel in clear text. Someone who records the UDP traffic today and gets the shared key later (a stolen `/etc/lastgasp/agent.key`, a server database backup, a leaked key file) can derive every run key and read every line ever sent with that key.

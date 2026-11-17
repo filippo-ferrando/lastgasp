@@ -1,5 +1,7 @@
 # How it works
 
+The agent reads kernel lines and sends them over encrypted UDP; the server acks what arrives, stores it and turns what matters into incidents. This page follows a line from the kernel to the database.
+
 ```text
  machine (agent)                                    server
  ┌──────────────────────────────┐                   ┌──────────────────────────────────────┐
@@ -13,6 +15,15 @@
                                                     │ web UI, JSON API, /metrics           │
                                                     └──────────────────────────────────────┘
 ```
+
+- [The agent](#the-agent)
+- [Packets](#packets)
+- [Enrollment](#enrollment)
+- [Sequence numbers](#sequence-numbers)
+- [Acks](#acks)
+- [The server](#the-server)
+- [Missing packets](#missing-packets)
+- [Deduplication](#deduplication)
 
 ## The agent
 

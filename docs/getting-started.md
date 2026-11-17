@@ -2,6 +2,13 @@
 
 This page sets up one server and one agent, then checks that logs arrive. Details for each part are in [agent.md](agent.md) and [server.md](server.md).
 
+- [Requirements](#requirements)
+- [1. Start the server](#1-start-the-server)
+- [2. Install the agent](#2-install-the-agent)
+- [3. Check that logs arrive](#3-check-that-logs-arrive)
+- [4. Next steps](#4-next-steps)
+- [Building from source](#building-from-source)
+
 ## Requirements
 
 | Part | Needs |
@@ -104,4 +111,4 @@ make test       # all tests with the race detector, plus the script tests
 make image      # lastgasp-server Docker image
 ```
 
-`deploy/install-agent.sh` run from a checkout uses `bin/lastgasp-agent` when it exists, and downloads the newest release otherwise.
+`deploy/install-agent.sh` run from a checkout uses `bin/lastgasp-agent` when it exists, and downloads the newest release otherwise. Tests and the code layout are in [CONTRIBUTING.md](../CONTRIBUTING.md).

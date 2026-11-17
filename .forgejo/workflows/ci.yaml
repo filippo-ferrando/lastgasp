@@ -1,10 +1,37 @@
 # Tests pushes to main and pull requests. Tags are tested by release.yaml.
+# Runs only when code, build or deploy files change; docs and Markdown files are skipped.
 name: CI
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/**"
+      - "examples/**"
+      - "Makefile"
+      - "Dockerfile"
+      - "compose.yaml"
+      - ".forgejo/workflows/ci.yaml"
+      - "!**.md"
   pull_request:
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/**"
+      - "examples/**"
+      - "Makefile"
+      - "Dockerfile"
+      - "compose.yaml"
+      - ".forgejo/workflows/ci.yaml"
+      - "!**.md"
 
 permissions:
   contents: read

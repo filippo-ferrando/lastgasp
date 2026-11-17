@@ -1,46 +1,97 @@
-<div align="center">
-  <img src="docs/logo.png" width="600" alt="lastgasp logo">
-</div>
+<p align="center">
+  <img src="docs/assets/header.jpg" alt="lastgasp" width="800">
+</p>
 
-# Lastgasp
+<p align="center">
+  <strong>A kernel log shipper for machines that are about to die.</strong><br>
+  The last words of a crashing, freezing or failing Linux machine, saved somewhere else.
+</p>
 
-A kernel log shipper for machines that are about to die.
+<p align="center">
+  A small agent reads the kernel log from <code>/dev/kmsg</code> and pstore and sends every line
+  over encrypted UDP to a server. The server stores the logs, notices missing packets, turns
+  crashes, reboots and kernel errors into incidents and sends alerts.
+</p>
 
-## Why I built this
+<p align="center">
+  <a href="https://git.fferrando.cc/rdfilippo/lastgasp/actions?workflow=ci.yaml"><img alt="CI" src="https://git.fferrando.cc/rdfilippo/lastgasp/actions/workflows/ci.yaml/badge.svg?label=ci"></a>
+  <a href="https://git.fferrando.cc/rdfilippo/lastgasp/releases"><img alt="Release" src="https://img.shields.io/gitea/v/release/rdfilippo/lastgasp?gitea_url=https%3A%2F%2Fgit.fferrando.cc&label=release&color=2ea043"></a>
+  <a href="go.mod"><img alt="Go" src="https://img.shields.io/badge/go-1.27-00ADD8?logo=go&logoColor=white"></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/agent-linux%20amd64%20%7C%20arm64%20%7C%20arm-1d2840">
+  <a href="LICENSE.txt"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
+</p>
 
-If you've ever had a server freeze, reboot, and come back with nothing useful in the logs, you know the feeling. The kernel probably screamed something right before it went down, but journald was writing to the same disk that was failing, or the box locked up before anything got flushed. You end up guessing.
+<p align="center">
+  <a href="#why-lastgasp">Why</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#limits">Limits</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="#license">License</a>
+</p>
 
-I wanted the last words of a machine to land somewhere else, every time. So I wrote `lastgasp`. It's a small agent that reads the kernel log straight from `/dev/kmsg` and fires every line over encrypted UDP to a server, and a server that stores everything, notices when something goes wrong and tells you about it.
+---
 
-The agent assumes the worst: dead disk, broken DNS, no memory, kernel panic. It's a static binary that reads its config once at start, locks itself in RAM, never touches the disk again, and keeps going no matter what.
+## Why lastgasp?
 
-## What it does
+A server freezes, reboots and comes back with nothing useful in the logs. The kernel probably
+printed something right before it went down, but journald was writing to the same disk that was
+failing, or the box locked up before anything got flushed.
 
-**Agent** (`lastgasp-agent`)
+lastgasp sends the last words of a machine somewhere else, every time. The agent assumes the
+worst: dead disk, broken DNS, no memory, kernel panic. It is a static binary that reads its
+config once at start, locks itself in RAM, never touches the disk again and keeps going.
 
-- reads `/dev/kmsg` and, after a crash, the logs the kernel saved in pstore
-- encrypts every line and sends it over UDP, one line per packet, with keys from a Noise handshake that change every 2 minutes, so a key stolen later cannot open old traffic
-- holds lines in memory until a server actually answers, so starting the agent before the server (or before you add its key) loses nothing
-- keeps each line until a server confirms it got it, and sends lost lines again
-- keeps unconfirmed lines in a RAM-only stash under `/run`, so an agent restart or upgrade does not lose them, and in pmsg (ramoops), so a warm reboot does not either
-- can also send userspace lines from journald, on their own queue so they never hold back kernel lines
-- survives dead disks, DNS outages, OOM, journald hangs and its own bugs
-- installs in one line from the release page, and gets its own key with a join token (no key copying)
+|                        | journald / syslog on disk          | lastgasp                                              |
+| ---------------------- | ---------------------------------- | ----------------------------------------------------- |
+| Disk dies              | last lines lost with the disk      | lines already on the server                           |
+| Kernel panic           | nothing flushed                    | panic text from pstore after reboot, or live with netconsole |
+| Lost network packets   | not noticed                        | sequence numbers, acks and resends; gaps are counted  |
+| Someone sniffs traffic | plain text with remote syslog      | encrypted, with keys that change every 2 minutes      |
+| Crash noticed          | when someone looks                 | incident and alert (webhook, Telegram, email)         |
 
-**Server** (`lastgasp-server`)
+## Features
 
-- stores logs in SQLite or PostgreSQL, removes duplicates, and deletes old data by age, by level or by record count
-- counts missing, late and duplicate packets per machine, so you know when you're not seeing everything
-- turns crashes, reboots, silent hosts and kernel errors (panics, oopses, lockups, OOM kills, I/O errors...) into incidents, notices hosts that keep rebooting, and sends one alert when many hosts go down at once
-- can take the kernel netconsole too, so a panic arrives while it happens, even without pstore
-- watches itself and opens incidents when its database, queue, alerts or keys have problems
-- sends alerts to webhooks (Slack, Mattermost, Alertmanager, or plain JSON with an HMAC signature), Telegram and email
-- incident workflow: acknowledge or resolve with a note, and silences for maintenance windows
-- web UI with live logs, a JSON API, Prometheus metrics, health checks, and login with sessions, users and API tokens
+### Agent (`lastgasp-agent`)
+
+- **Kernel log and pstore.** Reads `/dev/kmsg` and, after a crash, the logs the kernel saved in
+  pstore, also when `systemd-pstore` already moved them.
+- **Encrypted UDP.** One line per packet, with keys from a Noise handshake that change every
+  2 minutes, so a key stolen later cannot open old traffic.
+- **Nothing lost on the way.** Lines are held in memory until a server answers, kept until a
+  server confirms them, and sent again when lost.
+- **Survives restarts and reboots.** Unconfirmed lines go to a RAM-only stash under `/run` for
+  agent restarts and upgrades, and to pmsg (ramoops) for warm reboots.
+- **Userspace logs too.** Optional journald lines, on their own queue so they never hold back
+  kernel lines.
+- **Hard to kill.** Survives dead disks, DNS outages, OOM, journald hangs and its own bugs.
+- **One line install.** From the release page, with a join token: the agent gets its own key, no
+  key copying.
+
+### Server (`lastgasp-server`)
+
+- **Storage.** SQLite or PostgreSQL, with deduplication and retention by age, by level or by
+  record count.
+- **Gap tracking.** Missing, late and duplicate packets counted per machine, so it is clear when
+  something is not seen.
+- **Incidents.** Crashes, reboots, silent hosts and kernel errors (panics, oopses, lockups, OOM
+  kills, I/O errors) become incidents. Hosts that keep rebooting are noticed, and many hosts
+  going down at once send one alert.
+- **Netconsole.** Takes the kernel netconsole too, so a panic arrives while it happens, even
+  without pstore.
+- **Watches itself.** Opens incidents when its database, queue, alerts or keys have problems.
+- **Alerts.** Webhooks (Slack, Mattermost, Alertmanager, or plain JSON with an HMAC signature),
+  Telegram and email. Acknowledge or resolve with a note, silence for maintenance windows.
+- **Web UI and API.** Live logs, a JSON API, Prometheus metrics, health checks, and login with
+  sessions, users and API tokens.
+- **Kubernetes.** A Helm chart with the agent on every node.
 
 ## Quick start
 
-Start the server (Docker here, release binaries and compose setups in [docs/getting-started.md](docs/getting-started.md)). `-agent-address` is where your machines reach it:
+Start the server. Docker is shown here; release binaries and compose setups are in
+[Getting started](docs/getting-started.md). `-agent-address` is where the machines reach it:
 
 ```sh
 docker run -d --name lastgasp -p 5140:5140/udp -p 127.0.0.1:8080:8080 -v lastgasp:/var/lib/lastgasp \
@@ -48,22 +99,28 @@ docker run -d --name lastgasp -p 5140:5140/udp -p 127.0.0.1:8080:8080 -v lastgas
   -listen :5140 -http :8080 -db /var/lib/lastgasp/lastgasp.db -agent-address 10.0.0.5:5140
 ```
 
-Open `http://127.0.0.1:8080`, click "Add agents" in the Agents section, and run the command it gives you on the machine you want to watch (Linux, root):
+Open `http://127.0.0.1:8080`, click **Add agents** in the Agents section, and run the command it
+gives on the machine to watch (Linux, root):
 
 ```sh
 curl -fsSL https://git.fferrando.cc/rdfilippo/lastgasp/releases/download/v1.0.0/install-agent.sh | sudo sh -s -- --server 10.0.0.5:5140 --token lgj_...
 ```
 
-The host shows up with its whole boot log. To check that it's live, run `echo hello > /dev/kmsg` on the agent machine and watch it show up.
+The host shows up with its whole boot log. To check that it is live, run
+`echo hello > /dev/kmsg` on the agent machine and watch it show up.
 
-Want to see an incident? On a **test** machine:
+To see an incident, on a **test** machine:
 
 ```sh
 echo "<3>BUG: just testing" > /dev/kmsg                            # kernel error incident
 echo 1 > /proc/sys/kernel/sysrq; echo c > /proc/sysrq-trigger     # real kernel panic, crash incident
 ```
 
-## How it works, in short
+> **Note:** key files still work for setups that prefer copying keys by hand, see
+> [Keys and enrollment](docs/server.md#keys-and-enrollment). On Kubernetes, use the
+> [Helm chart](docs/kubernetes.md).
+
+## How it works
 
 ```text
  /dev/kmsg, pstore ──► agent ── encrypted UDP ──► server ──► SQLite / PostgreSQL
@@ -72,69 +129,54 @@ echo 1 > /proc/sys/kernel/sysrq; echo c > /proc/sysrq-trigger     # real kernel 
                                                     └──► web UI, API, /metrics
 ```
 
-Every packet has a sequence number, so the server knows exactly what it missed. The server answers heartbeats with acks that say what arrived, the agent sends again what got lost, and it only sends logs while a server is answering. When a machine reboots, the server waits a bit for the crash logs from pstore, then decides whether it was a clean reboot or a crash.
+Every packet has a sequence number, so the server knows exactly what it missed. The server
+answers heartbeats with acks that say what arrived, the agent sends again what got lost, and it
+only sends logs while a server is answering. When a machine reboots, the server waits a bit for
+the crash logs from pstore, then decides whether it was a clean reboot or a crash.
 
-The longer version, with the packet format and all the details, is in [docs/how-it-works.md](docs/how-it-works.md).
+The packet format and the rest of the design are in [How it works](docs/how-it-works.md).
 
-Prefer copying keys around yourself? Key files still work, see [docs/server.md](docs/server.md#keys-and-enrollment).
+## Documentation
 
-## Docs
+| Guide                                                 | What's inside                                                         |
+| ----------------------------------------------------- | --------------------------------------------------------------------- |
+| [Getting started](docs/getting-started.md)            | First server, first agent in one line, check that logs arrive         |
+| [Agent](docs/agent.md)                                | Install script, enrollment, flags, stash, sizing, troubleshooting     |
+| [Server](docs/server.md)                              | Keys, systemd, Docker, PostgreSQL, retention, netconsole, reverse proxy |
+| [Kubernetes](docs/kubernetes.md)                      | Helm chart: agent DaemonSet, server, keys, Prometheus                 |
+| [Incidents and alerts](docs/incidents-and-alerts.md)  | Incident kinds, rules, webhooks, email, testing incidents             |
+| [Web UI and API](docs/web-ui-and-api.md)              | Login, roles, JSON API with examples, metrics                         |
+| [Operations](docs/operations.md)                      | Production checklist, Prometheus rules, backups, upgrades, limits     |
+| [How it works](docs/how-it-works.md)                  | Design, packets, acks, missing packets, deduplication                 |
+| [Forward secrecy](docs/forward-secrecy.md)            | The Noise handshake of version 5 packets                              |
 
-Everything is in [`docs/`](docs/README.md):
-
-- [Getting started](docs/getting-started.md): from zero to logs in the UI
-- [How it works](docs/how-it-works.md): design, packets, acks, deduplication
-- [Agent](docs/agent.md): install script, flags, sizing, troubleshooting
-- [Server](docs/server.md): systemd, Docker, PostgreSQL, retention, reverse proxy
-- [Kubernetes](docs/kubernetes.md): Helm chart with the agent on every node
-- [Incidents and alerts](docs/incidents-and-alerts.md): rules, webhooks, email, how to trigger test incidents
-- [Web UI and API](docs/web-ui-and-api.md): login, API examples, metrics
-- [Operations](docs/operations.md): production checklist, Prometheus rules, backups, upgrades
-- [Releasing](docs/releasing.md): CI, release files, server image
-
-Ready to use Docker Compose setups (SQLite, PostgreSQL, Telegram, Alertmanager, HTTPS) are in [`examples/`](examples/README.md).
-
-## Development
-
-```sh
-make             # bin/lastgasp-agent and bin/lastgasp-server, needs Go 1.27+
-make test        # all Go tests with the race detector, plus the install script, examples and Helm chart tests
-make dist VERSION=v1.2.0   # the release files in dist/
-make image       # server Docker image (make image-agent for the agent)
-```
-
-The PostgreSQL tests run when you point them at a database:
-
-```sh
-docker run -d --rm --name pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17-alpine
-LASTGASP_TEST_PG='postgres://postgres:test@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/store/
-```
-
-Code layout:
-
-```text
-cmd/lastgasp-agent     agent binary
-cmd/lastgasp-server    server binary, plus the "user" and "token" helper commands
-internal/wire          packet format and encryption
-internal/agent         kmsg and pstore readers, buffers, DNS cache, sender, hardening
-internal/server        ingest, enrollment, gap tracking, retention, login sessions, HTTP API, metrics, web UI
-internal/incident      incident rules and detection, webhook and email alerts
-internal/store         SQLite and PostgreSQL storage and schema upgrades
-internal/version       build version
-deploy/                systemd units, the agent install script and the Helm chart
-.forgejo/              CI and release workflows
-examples/              Docker Compose setups of the server
-docs/                  documentation
-```
+Ready to use Docker Compose setups (SQLite, PostgreSQL, Telegram, Alertmanager, HTTPS) are in
+[`examples/`](examples/README.md). The full index is in [docs/](docs/README.md).
 
 ## Limits
 
-I try to be honest about what it doesn't do (yet):
-
-- Lost lines are sent again only while they are still in the agent buffer (or its stash, after a restart). A long outage at full rate can still lose some (they show up as missing, at least).
-- A kernel panic stops everything instantly, the agent included. The panic message itself only reaches you through pstore, so set up a pstore backend (EFI or ramoops) on machines you care about.
+- Lost lines are sent again only while they are still in the agent buffer (or its stash, after a
+  restart). A long outage at full rate can still lose some; they show up as missing.
+- A kernel panic stops everything at once, the agent included. The panic message only arrives
+  through pstore or netconsole, so set up a pstore backend (EFI or ramoops) on machines that
+  matter.
 - On PostgreSQL, the size limit counts record rows only, not indexes or space waiting for vacuum.
 - Userspace logs come from journald only (`-journal`), not from plain syslog.
 - The web UI needs HTTPS in front of it (a reverse proxy) when used over the network.
 
-More in [docs/operations.md](docs/operations.md#known-limits) and [docs/open-work.md](docs/open-work.md). Issues and PRs are welcome!
+More in [Known limits](docs/operations.md#known-limits) and [Open work](docs/open-work.md).
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, the tests and the code layout. Notable changes, and the actions
+needed on upgrade, are listed in [CHANGELOG.md](CHANGELOG.md).
+
+```sh
+make            # bin/lastgasp-agent and bin/lastgasp-server
+make test       # Go tests with the race detector, plus script, examples and Helm chart tests
+```
+
+## License
+
+lastgasp is free software, released under the [GNU General Public License v3.0](LICENSE.txt).

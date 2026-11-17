@@ -4,18 +4,24 @@ CI runs on the Forgejo instance with Forgejo Actions. The workflows are in `.for
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| `ci.yaml` | pushes to `main` and pull requests | gofmt check, `go vet`, a build for each release architecture, `make test` |
+| `ci.yaml` | pushes to `main` and pull requests that change code, build or deploy files (not docs or Markdown) | gofmt check, `go vet`, a build for each release architecture, `make test` |
 | `release.yaml` | a pushed tag like `v1.2.0` (`v*.*.*`) | the same tests, then the release files, the server and agent images and the Helm chart |
+
+- [Cut a release](#cut-a-release)
+- [Setup](#setup)
+- [Build a release locally](#build-a-release-locally)
 
 ## Cut a release
 
-1. When the release needs an action on upgrade, write it in [upgrade-notes.md](upgrade-notes.md) under `## Unreleased`, and rename that heading to the tag, with a new `## Unreleased` section above it (`make test` needs one). The release notes start with the section of the tag.
+1. In [CHANGELOG.md](../CHANGELOG.md), rename `## [Unreleased]` to the version and date, like `## [1.2.0] - 2026-12-01`, add a new empty `## [Unreleased]` section above it (`make test` needs one), and update the link lines at the bottom. Actions needed on upgrade go under `### Upgrade`.
 2. Tag and push:
 
 ```sh
 git tag -a v1.2.0 -m "v1.2.0"
 git push origin v1.2.0
 ```
+
+The release body is the CHANGELOG.md section of the tag, with relative doc links pointing at the files of the tag. Without a section for the tag, the `Unreleased` section is used, and the release fails when both are missing.
 
 A tag with a dash, like `v1.2.0-rc1`, makes a prerelease and does not move the `latest`, `1.2` and `1.2.0` image tags.
 
@@ -24,7 +30,7 @@ A tag with a dash, like `v1.2.0-rc1`, makes a prerelease and does not move the `
 | Job | Does |
 | --- | --- |
 | `test` | `go vet` and `make test` |
-| `build` | `make dist VERSION=v1.2.0`, writes the release notes (upgrade notes of the tag, install line, image name, changes since the previous tag), keeps both as an artifact |
+| `build` | `make dist VERSION=v1.2.0`, writes the release notes (the CHANGELOG.md section of the tag, install line, image and chart names), keeps both as an artifact |
 | `image` | installs the Docker CLI, sets up buildx, logs in to the registry, builds and pushes the server and agent images |
 | `chart` | packages `deploy/helm/lastgasp` with the version of the tag and pushes it to the registry as an OCI chart |
 | `release` | publishes the Forgejo release of the tag with `softprops/action-gh-release`, once `build`, `image` and `chart` worked |

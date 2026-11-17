@@ -2,6 +2,18 @@
 
 The Helm chart in `deploy/helm/lastgasp` runs the agent as a DaemonSet on every node and the server (web UI, API, UDP ingest) as a Deployment with one replica. Each release pushes the chart, the server image and the agent image to the container registry.
 
+- [Install](#install)
+- [What gets installed](#what-gets-installed)
+- [Keys](#keys)
+- [The agent pod](#the-agent-pod)
+- [Server](#server)
+- [Netconsole](#netconsole)
+- [Journal](#journal)
+- [pmsg](#pmsg)
+- [Prometheus](#prometheus)
+- [Agents only](#agents-only)
+- [Upgrades](#upgrades)
+
 ## Install
 
 ```sh
@@ -213,4 +225,4 @@ The secret needs `agent.key` only, and the server needs a matching `*` line (or 
 
 ## Upgrades
 
-`helm upgrade` updates the server and the agents together. Read [upgrade-notes.md](upgrade-notes.md) first: new features stay off until their values are set. Agents hold records while the server restarts, and the DaemonSet replaces them one node at a time. The old agent pod stops before the new one starts, so the new one sends the records still in the stash.
+`helm upgrade` updates the server and the agents together. Read the [changelog](../CHANGELOG.md) first: new features stay off until their values are set. Agents hold records while the server restarts, and the DaemonSet replaces them one node at a time. The old agent pod stops before the new one starts, so the new one sends the records still in the stash.

@@ -2,6 +2,11 @@
 
 The server serves a web UI at `/`, a JSON API under `/api/`, Prometheus metrics at `/metrics` and a health check at `/healthz`, all on `-http`.
 
+- [Web UI](#web-ui)
+- [Login](#login)
+- [API](#api)
+- [Metrics](#metrics)
+
 ## Web UI
 
 The header shows the user, the server version and a "Log out" button. The page refreshes every 2 seconds, and stops while its browser tab is hidden. A table is only redrawn when its data changes, and not while text in it is selected, so lines can be copied. It follows the light or dark theme of the system.

@@ -2,6 +2,12 @@
 
 The server turns the moments that matter into incidents, one per host, boot, kind and rule, and sends them to alert targets.
 
+- [Incident kinds](#incident-kinds)
+- [Rules](#rules)
+- [Working with incidents](#working-with-incidents)
+- [Alerts](#alerts)
+- [Testing incidents](#testing-incidents)
+
 ## Incident kinds
 
 | Kind | Opened when | Closed when | Severity |

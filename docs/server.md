@@ -2,6 +2,20 @@
 
 `lastgasp-server` receives agent packets on UDP, stores the logs in SQLite or PostgreSQL, finds incidents, sends alerts and serves the web UI, a JSON API and Prometheus metrics, all from one process.
 
+- [Keys and enrollment](#keys-and-enrollment)
+- [Install as a systemd service](#install-as-a-systemd-service)
+- [Run with Docker](#run-with-docker)
+- [Run with Docker Compose and PostgreSQL](#run-with-docker-compose-and-postgresql)
+- [Flags](#flags)
+- [Health checks](#health-checks)
+- [Database](#database)
+- [Retention](#retention)
+- [Netconsole](#netconsole)
+- [Reload](#reload)
+- [Behind a reverse proxy](#behind-a-reverse-proxy)
+- [Firewall](#firewall)
+- [Stop](#stop)
+
 ## Keys and enrollment
 
 Every agent encrypts its packets with a key the server knows. There are two ways to give an agent its key, and both work side by side.
